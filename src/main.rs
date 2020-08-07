@@ -54,7 +54,7 @@ fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<Sftp> {
 }
 
 
-fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url) -> Result<()> {
+fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_size: usize) -> Result<()> {
     let mut dst_path = PathBuf::from(dst_url.path());
     let mut tmp_path = PathBuf::from(dst_url.path());
     let name = path.file_name().unwrap().to_str().unwrap();
@@ -69,8 +69,8 @@ fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url) -> Result<()
             return Ok(());
         }
     }
-    let mut f_in = BufReader::new(src.open(&path)?);
-    let mut f_out = BufWriter::new(dst.create(&tmp_path)?);
+    let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path)?);
+    let mut f_out = BufWriter::with_capacity(copy_buffer_size, dst.create(&tmp_path)?);
     let size = std::io::copy(&mut f_in, &mut f_out)?;
     match dst.rename(&tmp_path, &dst_path, None) {
         Err(e) =>error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {}", &tmp_path.display(), &dst_path.display(), e),
@@ -147,7 +147,7 @@ fn run() -> Result<()> {
                         },
                     };
                     if xfer {
-                        xfer_file(&path, &src, &dst, &cli.dst_url)?;
+                        xfer_file(&path, &src, &dst, &cli.dst_url, cli.copy_buffer_size)?;
                         tracker.xferred(&path, &filestat)?;
                     }
                 } else {

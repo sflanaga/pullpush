@@ -59,6 +59,10 @@ pub struct Cli {
     #[structopt(short="v", parse(from_occurrences))]
     /// log level
     pub verbosity: usize,
+
+    #[structopt(short="v", default_value("65536"))]
+    /// log level
+    pub copy_buffer_size: usize,
 }
 
 fn to_duration(s: &str) -> Result<Duration> {
