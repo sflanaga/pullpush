@@ -60,7 +60,7 @@ pub struct Cli {
     /// log level
     pub verbosity: usize,
 
-    #[structopt(short="v", default_value("65536"))]
+    #[structopt(long, default_value("65536"))]
     /// log level
     pub copy_buffer_size: usize,
 }
