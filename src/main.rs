@@ -63,7 +63,7 @@ fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_
     tmp_path.push(&tmpname[..]);
     let timer = Instant::now();
     match dst.stat(&dst_path) {
-        Err(e) => warn!("continue with error during stat of dest remote \"{}\", {}", &dst_path.display(), e),
+        Err(e) => (), // silencing useless info... for now warn!("continue with error during stat of dest remote \"{}\", {}", &dst_path.display(), e),
         Ok(_) => {
             warn!("file: \"{}\" already at {}", &path.file_name().unwrap().to_string_lossy(), &dst_url);
             return Ok(());
@@ -73,13 +73,13 @@ fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_
     let mut f_out = BufWriter::with_capacity(copy_buffer_size, dst.create(&tmp_path)?);
     let size = std::io::copy(&mut f_in, &mut f_out)?;
     match dst.rename(&tmp_path, &dst_path, None) {
-        Err(e) =>error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {}", &tmp_path.display(), &dst_path.display(), e),
+        Err(e) => error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {}", &tmp_path.display(), &dst_path.display(), e),
         Ok(()) => {
             let t = timer.elapsed().as_secs_f64();
             let r = (size as f64) / t;
             info!("xferred: \"{}\" to {} \"{}\" size: {}  rate: {:.3}MB/s  time: {:.3} secs", path.display(), &dst_url, &path.file_name().unwrap().to_string_lossy(),
-            size, r/(1024f64*1024f64), t)
-        },
+                  size, r / (1024f64 * 1024f64), t)
+        }
     }
 
     Ok(())
@@ -121,7 +121,7 @@ fn run() -> Result<()> {
                 .ok_or(anyhow!("Cannot map path to a filename - weird \"{}\"", &path.display()))?.to_str().unwrap();
 
             let ft = SystemTime::UNIX_EPOCH.add(Duration::from_secs(filestat.mtime.unwrap()));
-            let age = now.duration_since(ft).with_context(||format!("mtime calc: mtime: {}, now: {:?} ft: {:?}", filestat.mtime.unwrap(), now, ft))?;
+            let age = now.duration_since(ft).with_context(|| format!("mtime calc: mtime: {}, now: {:?} ft: {:?}", filestat.mtime.unwrap(), now, ft))?;
             if age > cli.max_age {
                 trace!("file \"{}\" to old at {:?}", &path.display(), age);
             } else if age < cli.min_age {
@@ -133,19 +133,19 @@ fn run() -> Result<()> {
                         TrackDelta::None => {
                             trace!("transferring file \"{}\" not in tracker", &path.display());
                             true
-                        },
+                        }
                         TrackDelta::LastModChange => {
                             trace!("transferring file \"{}\" last mod time has changed", &path.display());
                             true
-                        },
+                        }
                         TrackDelta::SizeChange => {
                             trace!("transferring file \"{}\" size has changed", &path.display());
                             true
-                        },
+                        }
                         TrackDelta::Equal => {
                             trace!("skipping file \"{}\" has already transferred according to tracking set", &path.display());
                             false
-                        },
+                        }
                     };
                     if xfer {
                         xfer_file(&path, &src, &dst, &cli.dst_url, cli.copy_buffer_size)?;
