@@ -75,9 +75,10 @@ fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_
     match dst.rename(&tmp_path, &dst_path, None) {
         Err(e) =>error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {}", &tmp_path.display(), &dst_path.display(), e),
         Ok(()) => {
-            let r = (size as f64) / timer.elapsed().as_secs_f64();
-            info!("xferred: \"{}\" to {} \"{}\" size: {}  rate: {:.3}MB/s", path.display(), &dst_url, &path.file_name().unwrap().to_string_lossy(),
-            size, r/(1024f64*1024f64))
+            let t = timer.elapsed().as_secs_f64();
+            let r = (size as f64) / t;
+            info!("xferred: \"{}\" to {} \"{}\" size: {}  rate: {:.3}MB/s  time: {:.3} secs", path.display(), &dst_url, &path.file_name().unwrap().to_string_lossy(),
+            size, r/(1024f64*1024f64), t)
         },
     }
 
