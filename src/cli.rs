@@ -55,10 +55,10 @@ pub struct Cli {
     #[structopt(long, parse(try_from_str = to_duration))]
     /// max age to keep in tracking file
     pub max_track_age: Duration,
-}
 
-fn secs_to_dur(s: &str) -> Result<Duration> {
-    Ok(Duration::from_secs(s.parse::<u64>()?))
+    #[structopt(short="v", parse(from_occurrences))]
+    /// log level
+    pub verbosity: usize,
 }
 
 fn to_duration(s: &str) -> Result<Duration> {
