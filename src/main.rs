@@ -114,12 +114,12 @@ fn run() -> Result<()> {
     let (send,recv) = crossbeam_channel::unbounded();
 
     let mut hv = vec![];
-    for _ in 0..cli.threads {
+    for i in 0..cli.threads {
         let recv_c = recv.clone();
         let cli_c = cli.clone();
         let mut tracker_c = tracker.clone();
-        let src = src_sess.sftp()?;
-        let dst = dst_sess.sftp()?;
+        let src = src_sess.sftp().with_context(||format!("Unable to create the next channel at {} to src url - usually limited to 10 so set --threads to 8 maybe", i+2))?;
+        let dst = dst_sess.sftp().with_context(||format!("Unable to create the next channel at {} to dst url - usually limited to 10 so set --threads to 8 maybe", i+2))?;
         let h = std::thread::spawn(move || xferring(&recv_c, &cli_c, src, dst, &mut tracker_c));
         hv.push(h);
     }
