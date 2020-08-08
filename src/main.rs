@@ -39,7 +39,7 @@ fn check_url(url: &Url) -> Result<()> {
     Ok(())
 }
 
-fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<Sftp> {
+fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session,Sftp)> {
     let soc = url.socket_addrs(|| Some(22))?[0];
     let tcp = TcpStream::connect_timeout(&soc, timeout).with_context(|| format!("Tcp connection to url: {} failed", &url))?;
     let mut sess = Session::new().unwrap();
@@ -51,7 +51,7 @@ fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<Sftp> {
     let sftp = sess.sftp().context("Unable to setup sftp channel on this session")?;
     sftp.lstat(&*PathBuf::from(&url.path().to_string())).with_context(|| format!("Cannot stat check remote path of \"{}\"", url))?;
 
-    Ok(sftp)
+    Ok((sess, sftp))
 }
 
 
@@ -106,10 +106,9 @@ fn run() -> Result<()> {
         .unwrap();
 
     info!("creating sftp connections");
-    let src = create_sftp(&cli.src_url, &cli.src_pk, cli.timeout)?;
-    {
-        let dst = create_sftp(&cli.dst_url, &cli.dst_pk, cli.timeout)?;
-    }
+    let (src_sess, src) = create_sftp(&cli.src_url, &cli.src_pk, cli.timeout)?;
+    let (dst_sess, dst) = create_sftp(&cli.dst_url, &cli.dst_pk, cli.timeout)?;
+
     let mut tracker = Arc::new(RwLock::new(Tracker::new(&cli.track, cli.max_track_age)?));
 
     let (send,recv) = crossbeam_channel::unbounded();
@@ -119,7 +118,9 @@ fn run() -> Result<()> {
         let recv_c = recv.clone();
         let cli_c = cli.clone();
         let mut tracker_c = tracker.clone();
-        let h = std::thread::spawn(move || xferring(&recv_c, &cli_c, &mut tracker_c));
+        let src = src_sess.sftp()?;
+        let dst = dst_sess.sftp()?;
+        let h = std::thread::spawn(move || xferring(&recv_c, &cli_c, src, dst, &mut tracker_c));
         hv.push(h);
     }
 
@@ -195,16 +196,16 @@ fn run() -> Result<()> {
 }
 
 
-fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, tracker: &mut Arc<RwLock<Tracker>>) {
-    match xferring_inn(recv_c, cli_c, tracker) {
+fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Sftp, dst: Sftp, tracker: &mut Arc<RwLock<Tracker>>) {
+    match xferring_inn(recv_c, cli_c, src, dst, tracker) {
         Err(e) => error!("sending thread died: {} - maybe the others will get it down this round", e),
         Ok(_) => (),
     }
 }
 
-fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, tracker: &mut Arc<RwLock<Tracker>>) -> Result<()> {
-    let src = create_sftp(&cli_c.src_url, &cli_c.src_pk, cli_c.timeout)?;
-    let dst = create_sftp(&cli_c.dst_url, &cli_c.dst_pk, cli_c.timeout)?;
+fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Sftp, dst: Sftp, tracker: &mut Arc<RwLock<Tracker>>) -> Result<()> {
+    // let src = create_sftp(&cli_c.src_url, &cli_c.src_pk, cli_c.timeout)?;
+    // let dst = create_sftp(&cli_c.dst_url, &cli_c.dst_pk, cli_c.timeout)?;
     loop {
         let p = recv_c.recv()?;
         match p {
