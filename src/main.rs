@@ -44,7 +44,7 @@ fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session,Sf
     let tcp = TcpStream::connect_timeout(&soc, timeout).with_context(|| format!("Tcp connection to url: {} failed", &url))?;
     let mut sess = Session::new().unwrap();
     sess.set_tcp_stream(tcp);
-    sess.handshake().unwrap();
+    sess.handshake()?;
     sess.userauth_pubkey_file(&url.username(), None,
                               &pk, None).context("Unable to setup user with private key")?;
 
@@ -118,8 +118,17 @@ fn run() -> Result<()> {
         let recv_c = recv.clone();
         let cli_c = cli.clone();
         let mut tracker_c = tracker.clone();
-        let src = src_sess.sftp().with_context(||format!("Unable to create the next channel at {} to src url - usually limited to 10 so set --threads to 8 maybe", i+2))?;
-        let dst = dst_sess.sftp().with_context(||format!("Unable to create the next channel at {} to dst url - usually limited to 10 so set --threads to 8 maybe", i+2))?;
+
+        let (src,dst) = if cli.session_per_thread {
+            warn!("Creating new session: {}", i+1);
+            let (_, src) = create_sftp(&cli.src_url, &cli.src_pk, cli.timeout)?;
+            let (_, dst) = create_sftp(&cli.dst_url, &cli.dst_pk, cli.timeout)?;
+            (src,dst)
+        } else {
+            let src = src_sess.sftp().with_context(||format!("Unable to create the next channel at {} to src url - usually limited to 10 so set --threads to 8 maybe", i+2))?;
+            let dst = dst_sess.sftp().with_context(||format!("Unable to create the next channel at {} to dst url - usually limited to 10 so set --threads to 8 maybe", i+2))?;
+            (src,dst)
+        };
         let h = std::thread::spawn(move || xferring(&recv_c, &cli_c, src, dst, &mut tracker_c));
         hv.push(h);
     }

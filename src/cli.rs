@@ -64,8 +64,11 @@ pub struct Cli {
     /// To true debug your settings you might try trace level or -vvvv
     pub verbosity: usize,
 
-    #[structopt(long, default_value("65536"))]
-    /// log level
+    #[structopt(long, default_value("1048576"))]
+    /// Size of the buffer between pull and push connections
+    ///
+    /// Performance vary widely based on this number.  The
+    /// default is nice mid-way, but 64M might help.
     pub copy_buffer_size: usize,
 
     #[structopt(long)]
@@ -80,6 +83,10 @@ pub struct Cli {
     #[structopt(long, default_value="4")]
     /// Number of transfer threads and also connections used + 1 to source
     pub threads: usize,
+
+    #[structopt(long)]
+    /// Create a full session for each thread.  This can help performance.
+    pub session_per_thread: bool,
 }
 
 fn to_duration(s: &str) -> Result<Duration> {
