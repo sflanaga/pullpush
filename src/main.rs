@@ -115,7 +115,7 @@ fn run() -> Result<()> {
     let (send,recv) = crossbeam_channel::unbounded();
 
     let mut hv = vec![];
-    for _ in 0..4 {
+    for _ in 0..cli.threads {
         let recv_c = recv.clone();
         let cli_c = cli.clone();
         let mut tracker_c = tracker.clone();
@@ -162,9 +162,12 @@ fn run() -> Result<()> {
                         }
                     };
                     if xfer {
-                        send.send(Some( (path.clone(), filestat.clone()) ))?;
-                        // xfer_file(&path, &src, &dst, &cli.dst_url, cli.copy_buffer_size)?;
-                        // tracker.xferred(&path, &filestat)?;
+                        if !cli.dry_run {
+                            send.send(Some((path.clone(), filestat.clone())))?;
+                        } else {
+                            info!("would have xferred file: \"{}\"", &path.display());
+                            tracker.write().unwrap().xferred(&path, &filestat)?;
+                        }
                     }
                 } else {
                     trace!("file \"{}\" does not match RE", s);

@@ -33,7 +33,9 @@ pub struct Cli {
     pub dst_pk: PathBuf,
 
     #[structopt(long)]
-    /// regular expression on filename along to filter with
+    /// regular expression on filename of files to keep
+    ///
+    /// ".*" means all filenames will pass
     pub re: Regex,
 
     #[structopt(long)]
@@ -57,12 +59,27 @@ pub struct Cli {
     pub max_track_age: Duration,
 
     #[structopt(short="v", parse(from_occurrences))]
-    /// log level
+    /// log level - e.g. -vvv is the same as debug while -vv is info level
+    ///
+    /// To true debug your settings you might try trace level or -vvvv
     pub verbosity: usize,
 
     #[structopt(long, default_value("65536"))]
     /// log level
     pub copy_buffer_size: usize,
+
+    #[structopt(long)]
+    /// Runs without actual xfer, read long help for more
+    ///
+    /// This is useful to do initial tests without waiting for transfer
+    /// but also can be used to pre-populate the tracker with history
+    /// so that you can start transferring files ONLY after you this
+    /// dry_run and the run it normally.
+    pub dry_run: bool,
+
+    #[structopt(long, default_value="4")]
+    /// Number of transfer threads and also connections used + 1 to source
+    pub threads: usize,
 }
 
 fn to_duration(s: &str) -> Result<Duration> {
