@@ -142,15 +142,14 @@ fn run() -> Result<()> {
         let cli_c = cli.clone();
         let mut tracker_c = tracker.clone();
 
-        let (src, dst) = if cli.session_per_thread {
-            warn!("Creating new session: {}", i + 1);
-            let (_, src) = create_sftp(&cli.src_url, &cli.src_pk, cli.timeout)?;
-            let (_, dst) = create_sftp(&cli.dst_url, &cli.dst_pk, cli.timeout)?;
-            (src, dst)
-        } else {
+        let (src, dst) = if cli.reuse_sessions {
             let src = src_sess.sftp().with_context(|| format!("Unable to create the next channel at {} to src url - usually limited to 10 so set --threads to 8 maybe", i + 2))?;
             let dst = dst_sess.sftp().with_context(|| format!("Unable to create the next channel at {} to dst url - usually limited to 10 so set --threads to 8 maybe", i + 2))?;
-            (src, dst)
+            (Some(src), Some(dst))
+        } else {
+            warn!("Creating new session: {}", i + 1);
+            // this forces the transfer thread to create it's own session
+            (None, None)
         };
         let h = Builder::new().name(format!("{}:{}", "xfer", i)).spawn(move || xferring(&recv_c, &cli_c, src, dst, &mut tracker_c)).unwrap();
         xfer_threads.push(h);
@@ -160,6 +159,74 @@ fn run() -> Result<()> {
 
     debug!("listing remote");
     let mut count_files_listed = 0;
+    let now = SystemTime::now();
+
+    let h_lister_thread = {
+        let (cli_c, tracker_c, send_c) = (cli.clone(), tracker.clone(), send.clone());
+        Builder::new().name("lister".to_string()).spawn(move || lister_thread(&cli_c, src, &tracker_c, &send_c)).unwrap()
+    };
+
+    info!("lister completed listing: {} entries", h_lister_thread.join().unwrap()?);
+
+    let mut count = 0u64;
+    let mut size = 0u64;
+    for _ in &xfer_threads {
+        send.send(None)?;
+    }
+    for h in xfer_threads {
+        let (c,s) = h.join().unwrap();
+        count += c;
+        size += s;
+    }
+
+    let mb = (size as f64) / (1024.0*1024.0);
+    info!("listed {} entries, trans: {} files  {:.3} MB in {:.3} secs", count_files_listed, count, mb, start.elapsed().as_secs_f64());
+    tracker.write().unwrap().commit()?;
+
+    Ok(())
+}
+
+
+fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Option<Sftp>, dst: Option<Sftp>, tracker: &mut Arc<RwLock<Tracker>>) -> (u64, u64) {
+    match xferring_inn(recv_c, cli_c, src, dst, tracker) {
+        Err(e) => {
+            error!("sending thread died: {} - maybe the others will get it down this round", e);
+            (0, 0)
+        }
+        Ok(x) => x,
+    }
+}
+
+fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Option<Sftp>, dst: Option<Sftp>, tracker: &mut Arc<RwLock<Tracker>>) -> Result<(u64, u64)> {
+    let (l_src,l_dst) = if src.is_some() {
+        (src.unwrap(), dst.unwrap())
+    } else {
+        let src = create_sftp(&cli_c.src_url, &cli_c.src_pk, cli_c.timeout)?;
+        let dst = create_sftp(&cli_c.dst_url, &cli_c.dst_pk, cli_c.timeout)?;
+        info!("creating src/dst sessions");
+
+        (src.1, dst.1)
+    };
+
+    let mut count = 0u64;
+    let mut size = 0u64;
+    loop {
+        let p = recv_c.recv()?;
+        match p {
+            None => return Ok((count,size)),
+            Some(p) => {
+                let (c,s) = xfer_file(&p.0, &l_src, &l_dst, &cli_c.dst_url, cli_c.copy_buffer_size)?;
+                size += s;
+                count += c;
+                tracker.write().unwrap().xferred(&p.0, &p.1)?;
+            }
+        }
+    }
+    // Ok((count, size))
+}
+
+fn lister_thread(cli: &Arc<Cli>, src: Sftp, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStat)>>) -> Result<u64> {
+    let mut count_files_listed = 0u64;
     let now = SystemTime::now();
     for (path, filestat) in src.readdir(&PathBuf::from(cli.src_url.path()))? {
         count_files_listed += 1;
@@ -216,51 +283,6 @@ fn run() -> Result<()> {
             trace!("not a dir or file: {}  size: {}", &path.display(), *ft);
         }
     }
-    let mut count = 0u64;
-    let mut size = 0u64;
-    for _ in &xfer_threads {
-        send.send(None)?;
-    }
-    for h in xfer_threads {
-        let (c,s) = h.join().unwrap();
-        count += c;
-        size += s;
-    }
+    Ok(count_files_listed)
 
-    let mb = (size as f64) / (1024.0*1024.0);
-    info!("listed {} entries, trans: {} files  {:.3} MB in {:.3} secs", count_files_listed, count, mb, start.elapsed().as_secs_f64());
-    tracker.write().unwrap().commit()?;
-
-    Ok(())
-}
-
-
-fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Sftp, dst: Sftp, tracker: &mut Arc<RwLock<Tracker>>) -> (u64, u64) {
-    match xferring_inn(recv_c, cli_c, src, dst, tracker) {
-        Err(e) => {
-            error!("sending thread died: {} - maybe the others will get it down this round", e);
-            (0, 0)
-        }
-        Ok(x) => x,
-    }
-}
-
-fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Sftp, dst: Sftp, tracker: &mut Arc<RwLock<Tracker>>) -> Result<(u64, u64)> {
-    // let src = create_sftp(&cli_c.src_url, &cli_c.src_pk, cli_c.timeout)?;
-    // let dst = create_sftp(&cli_c.dst_url, &cli_c.dst_pk, cli_c.timeout)?;
-    let mut count = 0u64;
-    let mut size = 0u64;
-    loop {
-        let p = recv_c.recv()?;
-        match p {
-            None => return Ok((count,size)),
-            Some(p) => {
-                let (c,s) = xfer_file(&p.0, &src, &dst, &cli_c.dst_url, cli_c.copy_buffer_size)?;
-                size += s;
-                count += c;
-                tracker.write().unwrap().xferred(&p.0, &p.1)?;
-            }
-        }
-    }
-    // Ok((count, size))
 }

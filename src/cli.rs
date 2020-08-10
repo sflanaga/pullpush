@@ -85,8 +85,15 @@ pub struct Cli {
     pub threads: usize,
 
     #[structopt(long)]
-    /// Create a full session for each thread.  This can help performance.
-    pub session_per_thread: bool,
+    /// Create sftp channels from a single session
+    ///
+    /// By default each transfer thread creates it's down session for performance.
+    /// This changes things so that each thread re-uses a single session, but creates
+    /// a seperate channel for each thread instaed.  This can slow down transfers,
+    /// but minimizes the number of sessions to remote dest.
+    /// While the channels do allow multiple exchanges in flight, they do seem
+    /// to limit performance.
+    pub reuse_sessions: bool,
 
     #[structopt(long)]
     /// Include hidden files or files starting with '.'
@@ -98,7 +105,7 @@ pub struct Cli {
     /// Turn off any logging at all
     ///
     /// Even with things quiet there is still the tracker
-    /// if you must find out what has been transferred
+    /// if you must find out what has been transferredA
     pub quiet: bool,
 }
 
