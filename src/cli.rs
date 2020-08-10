@@ -32,6 +32,10 @@ pub struct Cli {
     /// destination private key files
     pub dst_pk: PathBuf,
 
+    #[structopt(long, default_value("644"), parse(try_from_str = to_perm))]
+    /// destination permissions in octal
+    pub dst_perm: i32,
+
     #[structopt(long)]
     /// regular expression on filename of files to keep
     ///
@@ -107,6 +111,10 @@ pub struct Cli {
     /// Even with things quiet there is still the tracker
     /// if you must find out what has been transferredA
     pub quiet: bool,
+}
+
+fn to_perm(s: &str) -> Result<i32> {
+    Ok(i32::from_str_radix(&s, 8)?)
 }
 
 fn to_duration(s: &str) -> Result<Duration> {
