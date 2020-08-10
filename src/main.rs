@@ -54,9 +54,9 @@ fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session, S
     sess.set_tcp_stream(tcp);
     sess.handshake()?;
     sess.userauth_pubkey_file(&url.username(), None,
-                              &pk, None).context("Unable to setup user with private key")?;
+                              &pk, None).with_context(|| format!("Unable to setup user with private key: {} for url {}", pk.display(), &url))?;
 
-    let sftp = sess.sftp().context("Unable to setup sftp channel on this session")?;
+    let sftp = sess.sftp().with_context(|| format!("Unable to create sftp session with private key: {} for url {}", pk.display(), &url))?;
     sftp.lstat(&*PathBuf::from(&url.path().to_string())).with_context(|| format!("Cannot stat check remote path of \"{}\"", url))?;
 
     Ok((sess, sftp))
