@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, Instant};
 
 use anyhow::{anyhow, Context};
 use log::{debug, error, info, trace, warn, Record};
-use ssh2::{Session, Sftp, FileStat};
+use ssh2::{Session, Sftp, FileStat, OpenFlags, OpenType};
 use structopt::StructOpt;
 use url::Url;
 use crossbeam_channel::{Receiver, Sender};
@@ -63,24 +63,26 @@ fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session, S
 }
 
 
-fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
+fn xfer_file(path: &PathBuf, filestat: &FileStat, perm: i32, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
     let mut dst_path = PathBuf::from(dst_url.path());
     let mut tmp_path = PathBuf::from(dst_url.path());
     let name = path.file_name().unwrap().to_str().unwrap();
     let tmpname = format!(".tmp{}", name);
     dst_path.push(&name[..]);
     tmp_path.push(&tmpname[..]);
+
     let timer = Instant::now();
     match dst.stat(&dst_path) {
         Err(_) => (), // silencing useless info... for now warn!("continue with error during stat of dest remote \"{}\", {}", &dst_path.display(), e),
         Ok(_) => {
             warn!("file: \"{}\" already at {}", &path.file_name().unwrap().to_string_lossy(), &dst_url);
-            return Ok((0,0));
+            return Ok((0, 0));
         }
     }
     let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path)?);
-    let mut f_out = BufWriter::with_capacity(copy_buffer_size, dst.create(&tmp_path)?);
+    let mut f_out = BufWriter::with_capacity(copy_buffer_size, src.open_mode(&tmp_path, OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?);
     let size = std::io::copy(&mut f_in, &mut f_out)?;
+
     match dst.rename(&tmp_path, &dst_path, None) {
         Err(e) => error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {}", &tmp_path.display(), &dst_path.display(), e),
         Ok(()) => {
@@ -91,7 +93,17 @@ fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_
         }
     }
 
-    Ok((1,size))
+    let mut newstats = FileStat { perm: Some(perm as u32), mtime: None, size: None, atime: None, gid: None, uid: None };
+    dst.setstat(&dst_path, newstats)?;
+
+    /* for now setting time remotely does not seem to work - here's what I tried:
+
+    let mut newstats = FileStat {perm: None, mtime: Some(filestat.mtime.unwrap()), size: None, atime: None, gid: None, uid: None};
+    dst.setstat(&dst_path, newstats)?;
+
+     */
+
+    Ok((1, size))
 }
 
 fn run() -> Result<()> {
@@ -107,10 +119,9 @@ fn run() -> Result<()> {
 
     let mut builder = env_logger::Builder::new();
 
-    builder.format(|buf, record:&Record| {
-        writeln!(buf, "{} [{:4}] [{}:{}] {:>5}: {} ",Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+    builder.format(|buf, record: &Record| {
+        writeln!(buf, "{} [{:4}] [{}:{}] {:>5}: {} ", Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"),
                  thread::current().name().or(Some("unknown")).unwrap(),
-
                  record.file().unwrap(),
                  record.line().unwrap(),
                  record.level(),
@@ -174,12 +185,12 @@ fn run() -> Result<()> {
         send.send(None)?;
     }
     for h in xfer_threads {
-        let (c,s) = h.join().unwrap();
+        let (c, s) = h.join().unwrap();
         count += c;
         size += s;
     }
 
-    let mb = (size as f64) / (1024.0*1024.0);
+    let mb = (size as f64) / (1024.0 * 1024.0);
     info!("listed {} entries, trans: {} files  {:.3} MB in {:.3} secs", count_files_listed, count, mb, start.elapsed().as_secs_f64());
     tracker.write().unwrap().commit()?;
 
@@ -198,7 +209,7 @@ fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, sr
 }
 
 fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Option<Sftp>, dst: Option<Sftp>, tracker: &mut Arc<RwLock<Tracker>>) -> Result<(u64, u64)> {
-    let (l_src,l_dst) = if src.is_some() {
+    let (l_src, l_dst) = if src.is_some() {
         (src.unwrap(), dst.unwrap())
     } else {
         let src = create_sftp(&cli_c.src_url, &cli_c.src_pk, cli_c.timeout)?;
@@ -213,12 +224,12 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>
     loop {
         let p = recv_c.recv()?;
         match p {
-            None => return Ok((count,size)),
-            Some(p) => {
-                let (c,s) = xfer_file(&p.0, &l_src, &l_dst, &cli_c.dst_url, cli_c.copy_buffer_size)?;
+            None => return Ok((count, size)),
+            Some((path, filestat)) => {
+                let (c, s) = xfer_file(&path, &filestat, cli_c.dst_perm, &l_src, &l_dst, &cli_c.dst_url, cli_c.copy_buffer_size)?;
                 size += s;
                 count += c;
-                tracker.write().unwrap().xferred(&p.0, &p.1)?;
+                tracker.write().unwrap().xferred(&path, &filestat)?;
             }
         }
     }
@@ -245,7 +256,7 @@ fn lister_thread(cli: &Arc<Cli>, src: Sftp, tracker: &Arc<RwLock<Tracker>>, send
                 trace!("file \"{}\" excluded as a dot file or hidden", &path.display());
             } else {
                 trace!("file \"{}\" has good age at {:?}", &path.display(), age);
-                if cli.re.is_match(s)  {
+                if cli.re.is_match(s) {
                     let xfer = match tracker.write().unwrap().check(&path, &filestat)? {
                         TrackDelta::None => {
                             trace!("transferring file \"{}\" not in tracker", &path.display());
@@ -284,5 +295,4 @@ fn lister_thread(cli: &Arc<Cli>, src: Sftp, tracker: &Arc<RwLock<Tracker>>, send
         }
     }
     Ok(count_files_listed)
-
 }
