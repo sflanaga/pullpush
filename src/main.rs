@@ -80,7 +80,7 @@ fn xfer_file(path: &PathBuf, filestat: &FileStat, perm: i32, src: &Sftp, dst: &S
         }
     }
     let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path)?);
-    let mut f_out = BufWriter::with_capacity(copy_buffer_size, src.open_mode(&tmp_path, OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?);
+    let mut f_out = BufWriter::with_capacity(copy_buffer_size, dst.open_mode(&tmp_path, OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?);
     let size = std::io::copy(&mut f_in, &mut f_out)?;
 
     match dst.rename(&tmp_path, &dst_path, None) {
