@@ -228,7 +228,7 @@ fn run() -> Result<()> {
     }
 
     let mb = (size as f64) / (1024.0*1024.0);
-    info!("listed {} entries, trans: {} files  {:3} MB in {:3} secs", count_files_listed, count, mb, start.elapsed().as_secs_f64());
+    info!("listed {} entries, trans: {} files  {:.3} MB in {:.3} secs", count_files_listed, count, mb, start.elapsed().as_secs_f64());
     tracker.write().unwrap().commit()?;
 
     Ok(())
