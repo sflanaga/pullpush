@@ -1,15 +1,16 @@
-// #![allow(dead_code)]
-// #![allow(unused_imports)]
-// #![allow(unused_variables)]
-//
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+
 use std::io::{BufReader, BufWriter};
+use std::io::Write;
 use std::net::TcpStream;
 use std::ops::Add;
 use std::path::{PathBuf};
 use std::time::{Duration, SystemTime, Instant};
 
 use anyhow::{anyhow, Context};
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, trace, warn, Record};
 use ssh2::{Session, Sftp, FileStat};
 use structopt::StructOpt;
 use url::Url;
@@ -18,6 +19,13 @@ use track::{TrackDelta, Tracker};
 
 use crate::cli::Cli;
 use std::sync::{Arc, RwLock};
+use std::thread;
+use chrono::Utc;
+use env_logger::Env;
+use env_logger::fmt::Color;
+
+use log::Level;
+use std::thread::Builder;
 
 mod cli;
 mod track;
@@ -39,7 +47,7 @@ fn check_url(url: &Url) -> Result<()> {
     Ok(())
 }
 
-fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session,Sftp)> {
+fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session, Sftp)> {
     let soc = url.socket_addrs(|| Some(22))?[0];
     let tcp = TcpStream::connect_timeout(&soc, timeout).with_context(|| format!("Tcp connection to url: {} failed", &url))?;
     let mut sess = Session::new().unwrap();
@@ -55,7 +63,7 @@ fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session,Sf
 }
 
 
-fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_size: usize) -> Result<()> {
+fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
     let mut dst_path = PathBuf::from(dst_url.path());
     let mut tmp_path = PathBuf::from(dst_url.path());
     let name = path.file_name().unwrap().to_str().unwrap();
@@ -64,10 +72,10 @@ fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_
     tmp_path.push(&tmpname[..]);
     let timer = Instant::now();
     match dst.stat(&dst_path) {
-        Err(e) => (), // silencing useless info... for now warn!("continue with error during stat of dest remote \"{}\", {}", &dst_path.display(), e),
+        Err(_) => (), // silencing useless info... for now warn!("continue with error during stat of dest remote \"{}\", {}", &dst_path.display(), e),
         Ok(_) => {
-                warn!("file: \"{}\" already at {}", &path.file_name().unwrap().to_string_lossy(), &dst_url);
-            return Ok(());
+            warn!("file: \"{}\" already at {}", &path.file_name().unwrap().to_string_lossy(), &dst_url);
+            return Ok((0,0));
         }
     }
     let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path)?);
@@ -83,7 +91,7 @@ fn xfer_file(path: &PathBuf, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_
         }
     }
 
-    Ok(())
+    Ok((1,size))
 }
 
 fn run() -> Result<()> {
@@ -96,49 +104,65 @@ fn run() -> Result<()> {
         }
         cli
     });
-    eprintln!("verbose: {}", cli.verbosity);
-    stderrlog::new()
-        .module(module_path!())
-        .quiet(false)
-        .verbosity(cli.verbosity)
-        .timestamp(stderrlog::Timestamp::Millisecond) // opt.ts.unwrap_or(stderrlog::Timestamp::Off))
-        .init()
-        .unwrap();
+
+    let mut builder = env_logger::Builder::new();
+
+    builder.format(|buf, record:&Record| {
+        writeln!(buf, "{} [{:4}] [{}:{}] {:>5}: {} ",Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                 thread::current().name().or(Some("unknown")).unwrap(),
+
+                 record.file().unwrap(),
+                 record.line().unwrap(),
+                 record.level(),
+                 record.args())
+    });
+    let log_level = match (cli.quiet, cli.verbosity) {
+        (true, _) => log::LevelFilter::Off,
+        (false, 0) => log::LevelFilter::Error,
+        (false, 1) => log::LevelFilter::Warn,
+        (false, 2) => log::LevelFilter::Info,
+        (false, 3) => log::LevelFilter::Debug,
+        (false, _) => log::LevelFilter::Trace,
+    };
+    builder.filter_level(log_level);
+
+    builder.init();
 
     info!("creating sftp connections");
     let (src_sess, src) = create_sftp(&cli.src_url, &cli.src_pk, cli.timeout)?;
-    let (dst_sess, dst) = create_sftp(&cli.dst_url, &cli.dst_pk, cli.timeout)?;
+    let (dst_sess, _dst) = create_sftp(&cli.dst_url, &cli.dst_pk, cli.timeout)?;
 
-    let mut tracker = Arc::new(RwLock::new(Tracker::new(&cli.track, cli.max_track_age)?));
+    let tracker = Arc::new(RwLock::new(Tracker::new(&cli.track, cli.max_track_age)?));
 
-    let (send,recv) = crossbeam_channel::unbounded();
+    let (send, recv) = crossbeam_channel::unbounded();
 
-    let mut hv = vec![];
+    let mut xfer_threads = vec![];
     for i in 0..cli.threads {
         let recv_c = recv.clone();
         let cli_c = cli.clone();
         let mut tracker_c = tracker.clone();
 
-        let (src,dst) = if cli.session_per_thread {
-            warn!("Creating new session: {}", i+1);
+        let (src, dst) = if cli.session_per_thread {
+            warn!("Creating new session: {}", i + 1);
             let (_, src) = create_sftp(&cli.src_url, &cli.src_pk, cli.timeout)?;
             let (_, dst) = create_sftp(&cli.dst_url, &cli.dst_pk, cli.timeout)?;
-            (src,dst)
+            (src, dst)
         } else {
-            let src = src_sess.sftp().with_context(||format!("Unable to create the next channel at {} to src url - usually limited to 10 so set --threads to 8 maybe", i+2))?;
-            let dst = dst_sess.sftp().with_context(||format!("Unable to create the next channel at {} to dst url - usually limited to 10 so set --threads to 8 maybe", i+2))?;
-            (src,dst)
+            let src = src_sess.sftp().with_context(|| format!("Unable to create the next channel at {} to src url - usually limited to 10 so set --threads to 8 maybe", i + 2))?;
+            let dst = dst_sess.sftp().with_context(|| format!("Unable to create the next channel at {} to dst url - usually limited to 10 so set --threads to 8 maybe", i + 2))?;
+            (src, dst)
         };
-        let h = std::thread::spawn(move || xferring(&recv_c, &cli_c, src, dst, &mut tracker_c));
-        hv.push(h);
+        let h = Builder::new().name(format!("{}:{}", "xfer", i)).spawn(move || xferring(&recv_c, &cli_c, src, dst, &mut tracker_c)).unwrap();
+        xfer_threads.push(h);
     }
 
+    let start = Instant::now();
 
     debug!("listing remote");
-    let mut count = 0;
+    let mut count_files_listed = 0;
     let now = SystemTime::now();
     for (path, filestat) in src.readdir(&PathBuf::from(cli.src_url.path()))? {
-        count += 1;
+        count_files_listed += 1;
         if filestat.is_file() {
             trace!("considering file: {}", &path.display());
             let s = path.file_name()
@@ -150,9 +174,11 @@ fn run() -> Result<()> {
                 trace!("file \"{}\" to old at {:?}", &path.display(), age);
             } else if age < cli.min_age {
                 trace!("file \"{}\" to new at {:?}", &path.display(), age);
+            } else if s.starts_with('.') && !cli.include_dot_files {
+                trace!("file \"{}\" excluded as a dot file or hidden", &path.display());
             } else {
                 trace!("file \"{}\" has good age at {:?}", &path.display(), age);
-                if cli.re.is_match(s) {
+                if cli.re.is_match(s)  {
                     let xfer = match tracker.write().unwrap().check(&path, &filestat)? {
                         TrackDelta::None => {
                             trace!("transferring file \"{}\" not in tracker", &path.display());
@@ -190,40 +216,51 @@ fn run() -> Result<()> {
             trace!("not a dir or file: {}  size: {}", &path.display(), *ft);
         }
     }
-
-    for _ in &hv {
+    let mut count = 0u64;
+    let mut size = 0u64;
+    for _ in &xfer_threads {
         send.send(None)?;
     }
-    for h in hv {
-        h.join().unwrap();
+    for h in xfer_threads {
+        let (c,s) = h.join().unwrap();
+        count += c;
+        size += s;
     }
 
-    debug!("listed {} entries", count);
+    let mb = (size as f64) / (1024.0*1024.0);
+    info!("listed {} entries, trans: {} files  {:3} MB in {:3} secs", count_files_listed, count, mb, start.elapsed().as_secs_f64());
     tracker.write().unwrap().commit()?;
 
     Ok(())
 }
 
 
-fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Sftp, dst: Sftp, tracker: &mut Arc<RwLock<Tracker>>) {
+fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Sftp, dst: Sftp, tracker: &mut Arc<RwLock<Tracker>>) -> (u64, u64) {
     match xferring_inn(recv_c, cli_c, src, dst, tracker) {
-        Err(e) => error!("sending thread died: {} - maybe the others will get it down this round", e),
-        Ok(_) => (),
+        Err(e) => {
+            error!("sending thread died: {} - maybe the others will get it down this round", e);
+            (0, 0)
+        }
+        Ok(x) => x,
     }
 }
 
-fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Sftp, dst: Sftp, tracker: &mut Arc<RwLock<Tracker>>) -> Result<()> {
+fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Sftp, dst: Sftp, tracker: &mut Arc<RwLock<Tracker>>) -> Result<(u64, u64)> {
     // let src = create_sftp(&cli_c.src_url, &cli_c.src_pk, cli_c.timeout)?;
     // let dst = create_sftp(&cli_c.dst_url, &cli_c.dst_pk, cli_c.timeout)?;
+    let mut count = 0u64;
+    let mut size = 0u64;
     loop {
         let p = recv_c.recv()?;
         match p {
-            None => return Ok(()),
+            None => return Ok((count,size)),
             Some(p) => {
-                xfer_file(&p.0, &src, &dst, &cli_c.dst_url, cli_c.copy_buffer_size)?;
+                let (c,s) = xfer_file(&p.0, &src, &dst, &cli_c.dst_url, cli_c.copy_buffer_size)?;
+                size += s;
+                count += c;
                 tracker.write().unwrap().xferred(&p.0, &p.1)?;
             }
         }
     }
-    Ok(())
+    // Ok((count, size))
 }

@@ -58,7 +58,7 @@ pub struct Cli {
     /// max age to keep in tracking file
     pub max_track_age: Duration,
 
-    #[structopt(short="v", parse(from_occurrences))]
+    #[structopt(short="v", parse(from_occurrences), conflicts_with("quiet"))]
     /// log level - e.g. -vvv is the same as debug while -vv is info level
     ///
     /// To true debug your settings you might try trace level or -vvvv
@@ -87,6 +87,19 @@ pub struct Cli {
     #[structopt(long)]
     /// Create a full session for each thread.  This can help performance.
     pub session_per_thread: bool,
+
+    #[structopt(long)]
+    /// Include hidden files or files starting with '.'
+    ///
+    /// By default hidden files are excluded
+    pub include_dot_files: bool,
+
+    #[structopt(long, conflicts_with("verbosity"))]
+    /// Turn off any logging at all
+    ///
+    /// Even with things quiet there is still the tracker
+    /// if you must find out what has been transferred
+    pub quiet: bool,
 }
 
 fn to_duration(s: &str) -> Result<Duration> {
