@@ -35,7 +35,7 @@ type Result<T> = anyhow::Result<T, anyhow::Error>;
 
 fn main() {
     if let Err(err) = run() {
-        error!("{:?}", &err);
+        error!("{:#?}", &err);
         std::process::exit(1);
     }
 }
@@ -84,7 +84,7 @@ fn xfer_file(path: &PathBuf, filestat: &FileStat, perm: i32, src: &Sftp, dst: &S
     let size = std::io::copy(&mut f_in, &mut f_out)?;
 
     match dst.rename(&tmp_path, &dst_path, None) {
-        Err(e) => error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {}", &tmp_path.display(), &dst_path.display(), e),
+        Err(e) => error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {:?}", &tmp_path.display(), &dst_path.display(), e),
         Ok(()) => {
             let t = timer.elapsed().as_secs_f64();
             let r = (size as f64) / t;
@@ -201,7 +201,7 @@ fn run() -> Result<()> {
 fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Option<Sftp>, dst: Option<Sftp>, tracker: &mut Arc<RwLock<Tracker>>) -> (u64, u64) {
     match xferring_inn(recv_c, cli_c, src, dst, tracker) {
         Err(e) => {
-            error!("sending thread died: {} - maybe the others will get it down this round", e);
+            error!("sending thread died: {:#?} - maybe the others will get it down this round", e);
             (0, 0)
         }
         Ok(x) => x,
