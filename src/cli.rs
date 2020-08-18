@@ -4,12 +4,17 @@ use url::Url;
 use std::path::PathBuf;
 use std::time::Duration;
 use regex::Regex;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    pub static ref BUILD_INFO: String  = format!("ver: {}  rev: {}  date: {}", env!("CARGO_PKG_VERSION"), env!("VERGEN_SHA_SHORT"), env!("VERGEN_BUILD_DATE"));
+}
 
 type Result<T> = std::result::Result<T, anyhow::Error>;
 
 #[derive(StructOpt, Debug, Clone)]
 #[structopt(
-rename_all = "kebab-case",
+version = BUILD_INFO.as_str(), rename_all = "kebab-case",
 global_settings(& [
 structopt::clap::AppSettings::ColoredHelp,
 structopt::clap::AppSettings::UnifiedHelpMessage

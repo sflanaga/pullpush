@@ -35,7 +35,7 @@ type Result<T> = anyhow::Result<T, anyhow::Error>;
 
 fn main() {
     if let Err(err) = run() {
-        error!("{:#?}", &err);
+        error!("Error: {} / {:?} / {:#?}", &err, &err, &err);
         std::process::exit(1);
     }
 }
@@ -50,6 +50,8 @@ fn check_url(url: &Url) -> Result<()> {
 fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session, Sftp)> {
     let soc = url.socket_addrs(|| Some(22))?[0];
     let tcp = TcpStream::connect_timeout(&soc, timeout).with_context(|| format!("Tcp connection to url: {} failed", &url))?;
+
+
     let mut sess = Session::new().unwrap();
     sess.set_tcp_stream(tcp);
     sess.handshake()?;
@@ -236,18 +238,28 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>
     // Ok((count, size))
 }
 
+fn get_file_age(path: &PathBuf, filestat: &FileStat) -> Duration {
+    let now = SystemTime::now();
+    let ft = SystemTime::UNIX_EPOCH.add(Duration::from_secs(filestat.mtime.unwrap()));
+
+    match now.duration_since(ft) {
+        Err(e) => {
+            warn!("got \"future\" time for path \"{}\", so assuming 0 age.  {:#?}", path.display(), &e);
+            Duration::from_secs(0)
+        }, // pretend its now
+        Ok(dur) => dur,
+    }
+}
+
 fn lister_thread(cli: &Arc<Cli>, src: Sftp, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStat)>>) -> Result<u64> {
     let mut count_files_listed = 0u64;
-    let now = SystemTime::now();
     for (path, filestat) in src.readdir(&PathBuf::from(cli.src_url.path()))? {
         count_files_listed += 1;
         if filestat.is_file() {
             trace!("considering file: {}", &path.display());
             let s = path.file_name()
                 .ok_or(anyhow!("Cannot map path to a filename - weird \"{}\"", &path.display()))?.to_str().unwrap();
-
-            let ft = SystemTime::UNIX_EPOCH.add(Duration::from_secs(filestat.mtime.unwrap()));
-            let age = now.duration_since(ft).with_context(|| format!("mtime calc: mtime: {}, now: {:?} ft: {:?}", filestat.mtime.unwrap(), now, ft))?;
+            let age = get_file_age(&path, &filestat);
             if age > cli.max_age {
                 trace!("file \"{}\" to old at {:?}", &path.display(), age);
             } else if age < cli.min_age {
