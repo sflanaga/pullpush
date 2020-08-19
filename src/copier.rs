@@ -6,6 +6,7 @@ use std::any::Any;
 use log::{debug, error, info, trace, warn, Record};
 use std::sync::{Arc, Mutex};
 use ssh2::File;
+use std::time::Instant;
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 
@@ -33,8 +34,10 @@ pub fn copier(p_reader: &mut Arc<Mutex<BufReader<File>>>, p_writer: &mut Arc<Mut
         let mut written = 0;
         let mut reader = t_reader.lock().expect("cannot lock reader in reader thread");
         loop {
+            let now = Instant::now();
             match r_recv.recv().expect("recv of reader thread failed") {
                 Some(mut buf) => {
+                    let afterrecv = now.elapsed().as_micros();
                     let len = match reader.read(&mut buf) {
                         Ok(len) => len,
                         Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
@@ -43,6 +46,7 @@ pub fn copier(p_reader: &mut Arc<Mutex<BufReader<File>>>, p_writer: &mut Arc<Mut
                             panic!("error in reader 1");
                         }
                     };
+                    let afterread = now.elapsed().as_micros();
                     written += len;
                     if len == 0 {
                         r_send.send(None).expect("sending none to writer thread");
@@ -50,6 +54,8 @@ pub fn copier(p_reader: &mut Arc<Mutex<BufReader<File>>>, p_writer: &mut Arc<Mut
                     } else {
                         r_send.send(Some((len, buf))).expect("send of reader thread failed");
                     }
+                    let aftersend = now.elapsed().as_micros();
+                    trace!("read: {}  waittime: {}  readtime: {}  sendtime: {}", len, afterrecv, (afterread-afterrecv), (aftersend-afterrecv));
                 }
                 None => return written,
             }
@@ -59,13 +65,18 @@ pub fn copier(p_reader: &mut Arc<Mutex<BufReader<File>>>, p_writer: &mut Arc<Mut
     let l_writer = spawn(move || {
         let mut writer = t_writer.lock().expect("cannot locker writer in writer thread");
         loop {
+            let now = Instant::now();
             match w_recv.recv().expect("recv in writer thread failed") {
                 Some((len, buf)) => {
                     if len == 0 {
                         return ();
                     } else {
+                        let waittime = now.elapsed().as_micros();
                         writer.write_all(&buf[..len]).expect("writer in writer thread failed");
+                        let afterwrite = now.elapsed().as_micros();
                         w_send.send(Some(buf)).expect("send in send thread failed");
+                        let aftersend = now.elapsed().as_micros();
+                        trace!("wrote: {}  waittime: {}  writetime: {}  sendtime: {}", len, waittime, (waittime - afterwrite), (afterwrite-aftersend));
                     }
                 }
                 None => return (),
