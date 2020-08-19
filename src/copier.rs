@@ -55,7 +55,7 @@ pub fn copier(p_reader: &mut Arc<Mutex<BufReader<File>>>, p_writer: &mut Arc<Mut
                         r_send.send(Some((len, buf))).expect("send of reader thread failed");
                     }
                     let aftersend = now.elapsed().as_micros();
-                    trace!("read: {}  waittime: {}  readtime: {}  sendtime: {}", len, afterrecv, (afterread-afterrecv), (aftersend-afterrecv));
+                    trace!("read: {}  waittime: {}  readtime: {}  sendtime: {}", len, afterrecv, (afterread-afterrecv), (aftersend-afterread));
                 }
                 None => return written,
             }
@@ -76,7 +76,7 @@ pub fn copier(p_reader: &mut Arc<Mutex<BufReader<File>>>, p_writer: &mut Arc<Mut
                         let afterwrite = now.elapsed().as_micros();
                         w_send.send(Some(buf)).expect("send in send thread failed");
                         let aftersend = now.elapsed().as_micros();
-                        trace!("wrote: {}  waittime: {}  writetime: {}  sendtime: {}", len, waittime, (waittime - afterwrite), (afterwrite-aftersend));
+                        trace!("wrote: {}  waittime: {}  writetime: {}  sendtime: {}", len, waittime, (afterwrite-waittime), (aftersend-afterwrite));
                     }
                 }
                 None => return (),
