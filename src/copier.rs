@@ -4,12 +4,33 @@ use std::thread::spawn;
 use anyhow::{anyhow, Context};
 use std::any::Any;
 use log::{debug, error, info, trace, warn, Record};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use ssh2::File;
 use std::time::Instant;
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 
+fn fill_buff(handle: &mut MutexGuard<BufReader<File>>, buff: &mut [u8]) -> Result<usize> {
+    // eprintln!("call fill");
+    let mut sz = handle.read(&mut buff[..])?;
+    // eprintln!("mid read: {}", sz);
+    loop {
+        if sz == 0 {
+            return Ok(sz);
+        } else if sz == buff.len() {
+            return Ok(sz);
+        }
+
+        let sz2 = handle.read(&mut buff[sz..])?;
+        // eprintln!("mid2 read: {}", sz2);
+
+        if sz2 == 0 {
+            return Ok(sz);
+        } else {
+            sz += sz2;
+        }
+    }
+}
 
 pub fn copier(p_reader: &mut Arc<Mutex<BufReader<File>>>, p_writer: &mut Arc<Mutex<BufWriter<File>>>, buff_size: usize, buff_ring_size: usize) -> Result<usize> {
     let (_r_send, _w_recv) = crossbeam_channel::unbounded::<Option<(usize, Vec<u8>)>>();
@@ -38,9 +59,9 @@ pub fn copier(p_reader: &mut Arc<Mutex<BufReader<File>>>, p_writer: &mut Arc<Mut
             match r_recv.recv().expect("recv of reader thread failed") {
                 Some(mut buf) => {
                     let afterrecv = now.elapsed().as_micros();
-                    let len = match reader.read(&mut buf) {
+                    let len = match fill_buff(&mut reader, &mut buf[..]) {   //reader.read_exact(&mut buf) {
                         Ok(len) => len,
-                        Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                        //Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                         Err(e) => {
                             error!("error in reading thread leading to panice");
                             panic!("error in reader 1");
