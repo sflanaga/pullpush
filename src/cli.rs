@@ -73,12 +73,17 @@ pub struct Cli {
     /// To true debug your settings you might try trace level or -vvvv
     pub verbosity: usize,
 
-    #[structopt(long, default_value("1048576"), parse(try_from_str = to_size_usize))]
+    #[structopt(long, default_value("64k"), parse(try_from_str = to_size_usize))]
     /// Size of the buffer between pull and push connections e.g. 1M or 256k
     ///
     /// Performance vary widely based on this number.  The
     /// default is nice mid-way, but 64M might help.
     pub copy_buffer_size: usize,
+
+
+    #[structopt(long, default_value("4"))]
+    /// number of buffers between read and write thread for copy
+    pub buffer_ring_size: usize,
 
     #[structopt(long)]
     /// Runs without actual xfer, read long help for more

@@ -18,7 +18,7 @@ use crossbeam_channel::{Receiver, Sender};
 use track::{TrackDelta, Tracker};
 
 use crate::cli::Cli;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Mutex};
 use std::thread;
 use chrono::Utc;
 use env_logger::Env;
@@ -29,6 +29,7 @@ use std::thread::Builder;
 
 mod cli;
 mod track;
+mod copier;
 
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
@@ -38,74 +39,6 @@ fn main() {
         error!("Error: {} / {:?} / {:#?}", &err, &err, &err);
         std::process::exit(1);
     }
-}
-
-fn check_url(url: &Url) -> Result<()> {
-    if url.port().is_none() { return Err(anyhow!("Url MUST set port explicitly: {}", &url)); }
-    if url.username().len() == 0 { return Err(anyhow!("Url MUST set username explicitly: {}", &url)); }
-
-    Ok(())
-}
-
-fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session, Sftp)> {
-    let soc = url.socket_addrs(|| Some(22))?[0];
-    let tcp = TcpStream::connect_timeout(&soc, timeout).with_context(|| format!("Tcp connection to url: {} failed", &url))?;
-
-
-    let mut sess = Session::new().unwrap();
-    sess.set_tcp_stream(tcp);
-    sess.handshake()?;
-    sess.userauth_pubkey_file(&url.username(), None,
-                              &pk, None).with_context(|| format!("Unable to setup user with private key: {} for url {}", pk.display(), &url))?;
-
-    let sftp = sess.sftp().with_context(|| format!("Unable to create sftp session with private key: {} for url {}", pk.display(), &url))?;
-    sftp.lstat(&*PathBuf::from(&url.path().to_string())).with_context(|| format!("Cannot stat check remote path of \"{}\"", url))?;
-
-    Ok((sess, sftp))
-}
-
-
-fn xfer_file(path: &PathBuf, filestat: &FileStat, perm: i32, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
-    let mut dst_path = PathBuf::from(dst_url.path());
-    let mut tmp_path = PathBuf::from(dst_url.path());
-    let name = path.file_name().unwrap().to_str().unwrap();
-    let tmpname = format!(".tmp{}", name);
-    dst_path.push(&name[..]);
-    tmp_path.push(&tmpname[..]);
-
-    let timer = Instant::now();
-    match dst.stat(&dst_path) {
-        Err(_) => (), // silencing useless info... for now warn!("continue with error during stat of dest remote \"{}\", {}", &dst_path.display(), e),
-        Ok(_) => {
-            warn!("file: \"{}\" already at {}", &path.file_name().unwrap().to_string_lossy(), &dst_url);
-            return Ok((0, 0));
-        }
-    }
-    let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path)?);
-    let mut f_out = BufWriter::with_capacity(copy_buffer_size, dst.open_mode(&tmp_path, OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?);
-    let size = std::io::copy(&mut f_in, &mut f_out)?;
-
-    match dst.rename(&tmp_path, &dst_path, None) {
-        Err(e) => error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {:?}", &tmp_path.display(), &dst_path.display(), e),
-        Ok(()) => {
-            let t = timer.elapsed().as_secs_f64();
-            let r = (size as f64) / t;
-            info!("xferred: \"{}\" to {} \"{}\" size: {}  rate: {:.3}MB/s  time: {:.3} secs", path.display(), &dst_url, &path.file_name().unwrap().to_string_lossy(),
-                  size, r / (1024f64 * 1024f64), t)
-        }
-    }
-
-    let mut newstats = FileStat { perm: Some(perm as u32), mtime: None, size: None, atime: None, gid: None, uid: None };
-    dst.setstat(&dst_path, newstats)?;
-
-    /* for now setting time remotely does not seem to work - here's what I tried:
-
-    let mut newstats = FileStat {perm: None, mtime: Some(filestat.mtime.unwrap()), size: None, atime: None, gid: None, uid: None};
-    dst.setstat(&dst_path, newstats)?;
-
-     */
-
-    Ok((1, size))
 }
 
 fn run() -> Result<()> {
@@ -200,6 +133,79 @@ fn run() -> Result<()> {
 }
 
 
+fn check_url(url: &Url) -> Result<()> {
+    if url.port().is_none() { return Err(anyhow!("Url MUST set port explicitly: {}", &url)); }
+    if url.username().len() == 0 { return Err(anyhow!("Url MUST set username explicitly: {}", &url)); }
+
+    Ok(())
+}
+
+fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session, Sftp)> {
+    let soc = url.socket_addrs(|| Some(22))?[0];
+    let tcp = TcpStream::connect_timeout(&soc, timeout).with_context(|| format!("Tcp connection to url: {} failed", &url))?;
+
+
+    let mut sess = Session::new().unwrap();
+    sess.set_tcp_stream(tcp);
+    sess.handshake()?;
+    sess.userauth_pubkey_file(&url.username(), None,
+                              &pk, None).with_context(|| format!("Unable to setup user with private key: {} for url {}", pk.display(), &url))?;
+
+    let sftp = sess.sftp().with_context(|| format!("Unable to create sftp session with private key: {} for url {}", pk.display(), &url))?;
+    sftp.lstat(&*PathBuf::from(&url.path().to_string())).with_context(|| format!("Cannot stat check remote path of \"{}\"", url))?;
+
+    Ok((sess, sftp))
+}
+
+
+fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStat, perm: i32, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
+    let mut dst_path = PathBuf::from(dst_url.path());
+    let mut tmp_path = PathBuf::from(dst_url.path());
+    let name = path.file_name().unwrap().to_str().unwrap();
+    let tmpname = format!(".tmp{}", name);
+    dst_path.push(&name[..]);
+    tmp_path.push(&tmpname[..]);
+
+    let timer = Instant::now();
+    match dst.stat(&dst_path) {
+        Err(_) => (), // silencing useless info... for now warn!("continue with error during stat of dest remote \"{}\", {}", &dst_path.display(), e),
+        Ok(_) => {
+            warn!("file: \"{}\" already at {}", &path.file_name().unwrap().to_string_lossy(), &dst_url);
+            return Ok((0, 0));
+        }
+    }
+    let mut f_in = Arc::new(Mutex::new(BufReader::with_capacity(copy_buffer_size, src.open(&path)?)));
+    let mut f_out = Arc::new(Mutex::new(BufWriter::with_capacity(copy_buffer_size,
+                                                                 dst.open_mode(&tmp_path,
+                                                                               OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?)));
+    let size = copier::copier(&mut f_in, &mut f_out, cli_c.copy_buffer_size, cli_c.buffer_ring_size)?;
+    //let size = std::io::copy(&mut f_in, &mut f_out)?;
+
+    match dst.rename(&tmp_path, &dst_path, None) {
+        Err(e) => error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {:?}", &tmp_path.display(), &dst_path.display(), e),
+        Ok(()) => {
+            let t = timer.elapsed().as_secs_f64();
+            let r = (size as f64) / t;
+            info!("xferred: \"{}\" to {} \"{}\" size: {}  rate: {:.3}MB/s  time: {:.3} secs", path.display(), &dst_url, &path.file_name().unwrap().to_string_lossy(),
+                  size, r / (1024f64 * 1024f64), t)
+        }
+    }
+
+    let mut newstats = FileStat { perm: Some(perm as u32), mtime: None, size: None, atime: None, gid: None, uid: None };
+    dst.setstat(&dst_path, newstats)?;
+
+    /* for now setting time remotely does not seem to work - here's what I tried:
+
+    let mut newstats = FileStat {perm: None, mtime: Some(filestat.mtime.unwrap()), size: None, atime: None, gid: None, uid: None};
+    dst.setstat(&dst_path, newstats)?;
+
+     */
+
+    Ok((1, size as u64))
+}
+
+
+
 fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Option<Sftp>, dst: Option<Sftp>, tracker: &mut Arc<RwLock<Tracker>>) -> (u64, u64) {
     match xferring_inn(recv_c, cli_c, src, dst, tracker) {
         Err(e) => {
@@ -228,7 +234,7 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>
         match p {
             None => return Ok((count, size)),
             Some((path, filestat)) => {
-                let (c, s) = xfer_file(&path, &filestat, cli_c.dst_perm, &l_src, &l_dst, &cli_c.dst_url, cli_c.copy_buffer_size)?;
+                let (c, s) = xfer_file(&cli_c, &path, &filestat, cli_c.dst_perm, &l_src, &l_dst, &cli_c.dst_url, cli_c.copy_buffer_size)?;
                 size += s;
                 count += c;
                 tracker.write().unwrap().xferred(&path, &filestat)?;
