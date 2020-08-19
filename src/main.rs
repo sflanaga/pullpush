@@ -174,12 +174,20 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStat, perm: i32, s
             return Ok((0, 0));
         }
     }
-    let mut f_in = Arc::new(Mutex::new(BufReader::with_capacity(copy_buffer_size, src.open(&path)?)));
-    let mut f_out = Arc::new(Mutex::new(BufWriter::with_capacity(copy_buffer_size,
-                                                                 dst.open_mode(&tmp_path,
-                                                                               OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?)));
-    let size = copier::copier(&mut f_in, &mut f_out, cli_c.copy_buffer_size, cli_c.buffer_ring_size)?;
-    //let size = std::io::copy(&mut f_in, &mut f_out)?;
+
+    let size = if cli_c.threaded_copy {
+        let mut f_in = Arc::new(Mutex::new(BufReader::with_capacity(copy_buffer_size, src.open(&path)?)));
+        let mut f_out = Arc::new(Mutex::new(BufWriter::with_capacity(copy_buffer_size,
+                                                                     dst.open_mode(&tmp_path,
+                                                                                   OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?)));
+        copier::copier(&mut f_in, &mut f_out, cli_c.copy_buffer_size, cli_c.buffer_ring_size)?
+    } else {
+        let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path)?);
+        let mut f_out = BufWriter::with_capacity(copy_buffer_size,
+                                                                     dst.open_mode(&tmp_path,
+                                                                                   OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?);
+        std::io::copy(&mut f_in, &mut f_out)? as usize
+    };
 
     match dst.rename(&tmp_path, &dst_path, None) {
         Err(e) => error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {:?}", &tmp_path.display(), &dst_path.display(), e),

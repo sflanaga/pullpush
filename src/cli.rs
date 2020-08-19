@@ -80,10 +80,18 @@ pub struct Cli {
     /// default is nice mid-way, but 64M might help.
     pub copy_buffer_size: usize,
 
-
     #[structopt(long, default_value("4"))]
     /// number of buffers between read and write thread for copy
     pub buffer_ring_size: usize,
+
+    #[structopt(short="C", long)]
+    /// split read and write into seperate threads
+    ///
+    /// By default the copy reads into a buff and then writes that buffer.
+    /// This might incur the cost of latency between waiting on a read
+    /// in order to do a write.  This attempts to decouple the 2 steps
+    /// with a buffer ring between these threads.
+    pub threaded_copy: bool,
 
     #[structopt(long)]
     /// Runs without actual xfer, read long help for more
