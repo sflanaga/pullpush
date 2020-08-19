@@ -176,11 +176,10 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStat, perm: i32, s
     }
 
     let size = if cli_c.threaded_copy {
-        let mut f_in = Arc::new(Mutex::new(BufReader::with_capacity(copy_buffer_size, src.open(&path)?)));
-        let mut f_out = Arc::new(Mutex::new(BufWriter::with_capacity(copy_buffer_size,
-                                                                     dst.open_mode(&tmp_path,
-                                                                                   OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?)));
-        copier::copier(&mut f_in, &mut f_out, cli_c.copy_buffer_size, cli_c.buffer_ring_size)?
+        let mut f_in = Arc::new(Mutex::new(src.open(&path)?));
+        let mut f_out = Arc::new(Mutex::new(dst.open_mode(&tmp_path,
+                                                                                   OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?));
+        copier::copier(cli_c.threaded_copy_fill_buffer, &mut f_in, &mut f_out, cli_c.copy_buffer_size, cli_c.buffer_ring_size)?
     } else {
         let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path)?);
         let mut f_out = BufWriter::with_capacity(copy_buffer_size,

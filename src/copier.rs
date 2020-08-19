@@ -10,7 +10,7 @@ use std::time::Instant;
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 
-fn fill_buff(handle: &mut MutexGuard<BufReader<File>>, buff: &mut [u8]) -> Result<usize> {
+fn fill_buff(handle: &mut MutexGuard<File>, buff: &mut [u8]) -> Result<usize> {
     // eprintln!("call fill");
     let mut sz = handle.read(&mut buff[..])?;
     // eprintln!("mid read: {}", sz);
@@ -32,7 +32,7 @@ fn fill_buff(handle: &mut MutexGuard<BufReader<File>>, buff: &mut [u8]) -> Resul
     }
 }
 
-pub fn copier(p_reader: &mut Arc<Mutex<BufReader<File>>>, p_writer: &mut Arc<Mutex<BufWriter<File>>>, buff_size: usize, buff_ring_size: usize) -> Result<usize> {
+pub fn copier(fill_reader_buffer: bool, p_reader: &mut Arc<Mutex<File>>, p_writer: &mut Arc<Mutex<File>>, buff_size: usize, buff_ring_size: usize) -> Result<usize> {
     let (_r_send, _w_recv) = crossbeam_channel::unbounded::<Option<(usize, Vec<u8>)>>();
     let (_w_send, _r_recv) = crossbeam_channel::unbounded::<Option<Vec<u8>>>();
 
@@ -59,7 +59,12 @@ pub fn copier(p_reader: &mut Arc<Mutex<BufReader<File>>>, p_writer: &mut Arc<Mut
             match r_recv.recv().expect("recv of reader thread failed") {
                 Some(mut buf) => {
                     let afterrecv = now.elapsed().as_micros();
-                    let len = match fill_buff(&mut reader, &mut buf[..]) {   //reader.read_exact(&mut buf) {
+                    let res_len = if fill_reader_buffer {
+                        fill_buff(&mut reader, &mut buf[..])
+                    } else {
+                        reader.read(&mut buf[..]).context("fail on regular read")
+                    };
+                    let len = match res_len {
                         Ok(len) => len,
                         //Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                         Err(e) => {

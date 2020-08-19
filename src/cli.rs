@@ -93,6 +93,13 @@ pub struct Cli {
     /// with a buffer ring between these threads.
     pub threaded_copy: bool,
 
+    #[structopt(short = "F", long)]
+    /// Do not proceed the buffer until full
+    ///
+    /// Performance vary widely based on this number.  The
+    /// default is nice mid-way, but 64M might help.
+    pub threaded_copy_fill_buffer: bool,
+
     #[structopt(long)]
     /// Runs without actual xfer, read long help for more
     ///
