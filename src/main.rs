@@ -175,7 +175,7 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStat, perm: i32, s
     match dst.stat(&dst_path) {
         Err(_) => (), // silencing useless info... for now warn!("continue with error during stat of dest remote \"{}\", {}", &dst_path.display(), e),
         Ok(_) => {
-            warn!("file: \"{}\" already at {}", &path.file_name().unwrap().to_string_lossy(), &dst_url);
+            warn!("file: \"{}\" already at {} and recording it as xferred - no overwrite option yet", &path.file_name().unwrap().to_string_lossy(), &dst_url);
             return Ok((0, 0));
         }
     }
@@ -293,12 +293,12 @@ fn lister_thread(cli: &Arc<Cli>, src: Sftp, tracker: &Arc<RwLock<Tracker>>, send
                             true
                         }
                         TrackDelta::LastModChange => {
-                            trace!("transferring file \"{}\" last mod time has changed", &path.display());
-                            true
+                            trace!("not transferring file \"{}\" but last mod time has changed", &path.display());
+                            false
                         }
                         TrackDelta::SizeChange => {
-                            trace!("transferring file \"{}\" size has changed", &path.display());
-                            true
+                            trace!("not transferring file \"{}\" but size has changed", &path.display());
+                            false
                         }
                         TrackDelta::Equal => {
                             trace!("skipping file \"{}\" has already transferred according to tracking set", &path.display());
