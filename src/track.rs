@@ -184,8 +184,8 @@ impl Tracker {
     }
 
     pub fn path_exist_in_tracker(&mut self, path: &PathBuf) -> bool {
-        let track = Track::from_just_path(&path)?;
-        return self.set.contains(track)
+        let track = Track::from_just_path(&path);
+        return self.set.contains(&track)
     }
 
     pub fn check(&mut self, path: &PathBuf, filestat: &FileStat) -> Result<TrackDelta> {

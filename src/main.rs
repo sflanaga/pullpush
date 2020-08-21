@@ -138,7 +138,7 @@ fn check_url(url: &Url) -> Result<()> {
         if url.port().is_none() { return Err(anyhow!("Url MUST set port explicitly: {}", &url)); }
         if url.username().len() == 0 { return Err(anyhow!("Url MUST set username explicitly: {}", &url)); }
         Ok(())
-    } else if url.scheme == "file" {
+    } else if url.scheme() == "file" {
         Ok(())
     } else {
         Err(anyhow!("Scheme \"{}\" not handled in url: {}", url.scheme(), &url))?
