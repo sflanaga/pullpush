@@ -60,11 +60,15 @@ fn main() -> Result<()>{
     let mut min = Duration::from_secs(3600);
     let mut max = Duration::from_secs(0);
     let mut sum = Duration::from_secs(0);
+    let mut count = 0;
     for t in &times {
+        count += 1;
         sum = sum.add(*t);
         min = *t.min(&min);
         max = *t.max(&max);
-        println!("time: {:?}", t);
+        if count < cli.limit_detailed_output {
+            println!("time: {:?}", t);
+        }
     }
 
     let mn = min.as_secs_f64();
