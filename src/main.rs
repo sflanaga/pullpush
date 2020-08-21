@@ -112,7 +112,7 @@ fn run() -> Result<()> {
         Builder::new().name("lister".to_string()).spawn(move || lister_thread(&cli_c, src, &tracker_c, &send_c)).unwrap()
     };
 
-    info!("lister completed listing: {} entries", h_lister_thread.join().unwrap()?);
+    info!("lister completed listing: {} entries in {:.3} seconds", h_lister_thread.join().unwrap()?, now.elapsed()?.as_secs_f64());
 
     let mut count = 0u64;
     let mut size = 0u64;
@@ -134,10 +134,15 @@ fn run() -> Result<()> {
 
 
 fn check_url(url: &Url) -> Result<()> {
-    if url.port().is_none() { return Err(anyhow!("Url MUST set port explicitly: {}", &url)); }
-    if url.username().len() == 0 { return Err(anyhow!("Url MUST set username explicitly: {}", &url)); }
-
-    Ok(())
+    if url.scheme() == "sftp" {
+        if url.port().is_none() { return Err(anyhow!("Url MUST set port explicitly: {}", &url)); }
+        if url.username().len() == 0 { return Err(anyhow!("Url MUST set username explicitly: {}", &url)); }
+        Ok(())
+    } else if url.scheme == "file" {
+        Ok(())
+    } else {
+        Err(anyhow!("Scheme \"{}\" not handled in url: {}", url.scheme(), &url))?
+    }
 }
 
 fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session, Sftp)> {

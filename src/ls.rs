@@ -3,6 +3,7 @@ use structopt::StructOpt;
 use std::time::Instant;
 use std::ops::Add;
 use std::time::Duration;
+use std::fs::Metadata;
 
 type Result<T> = std::result::Result<T, anyhow::Error>;
 
@@ -46,7 +47,7 @@ fn main() -> Result<()>{
         let now = Instant::now();
         let file = file?;
         if !cli.turn_off_meta_data {
-            let md = file.metadata()?;
+            let md: Metadata = file.metadata()?;
             if md.is_file() {
                 sum_size += md.len();
             }

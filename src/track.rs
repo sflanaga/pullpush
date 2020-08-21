@@ -62,6 +62,15 @@ impl Track {
             size: filestat.size.unwrap(),
         })
     }
+    fn from_just_path(path: &PathBuf) -> Self {
+        Track {
+            src_path: path.clone(),
+            lastmod: 0,
+            size: 0,
+        }
+    }
+
+
     pub fn write(&self, f: &mut dyn Write) -> Result<()> {
         write!(f, "{}\0{}\0{}\n", self.src_path.display(), self.lastmod, self.size)?;
         Ok(())
@@ -172,6 +181,11 @@ impl Tracker {
         }
         info!("read {} entries form \"{}\"", count, &path.display());
         Ok(())
+    }
+
+    pub fn path_exist_in_tracker(&mut self, path: &PathBuf) -> bool {
+        let track = Track::from_just_path(&path)?;
+        return self.set.contains(track)
     }
 
     pub fn check(&mut self, path: &PathBuf, filestat: &FileStat) -> Result<TrackDelta> {
