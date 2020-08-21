@@ -179,7 +179,8 @@ impl Tracker {
                 }
             }
         }
-        info!("read {} entries form \"{}\"", count, &path.display());
+
+        info!("read {} entries from \"{}\" in {:?}", count, &path.display(), now.elapsed().unwrap_or(Duration::from_secs(0)));
         Ok(())
     }
 
