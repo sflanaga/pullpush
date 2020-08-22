@@ -6,7 +6,7 @@ use std::io::{BufReader, BufWriter};
 use std::io::Write;
 use std::net::TcpStream;
 use std::ops::Add;
-use std::path::{PathBuf};
+use std::path::{PathBuf, Path};
 use std::time::{Duration, SystemTime, Instant};
 
 use anyhow::{anyhow, Context};
@@ -26,10 +26,12 @@ use env_logger::fmt::Color;
 
 use log::Level;
 use std::thread::Builder;
+use libssh2_sys::LIBSSH2_ERROR_FILE;
 
 mod cli;
 mod track;
 mod copier;
+mod vfs;
 
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
@@ -89,11 +91,11 @@ fn run() -> Result<()> {
         let mut tracker_c = tracker.clone();
 
         let (src, dst) = if cli.reuse_sessions {
+            warn!("Creating new session src/dst sessions: {}", i + 1);
             let src = src_sess.sftp().with_context(|| format!("Unable to create the next channel at {} to src url - usually limited to 10 so set --threads to 8 maybe", i + 2))?;
             let dst = dst_sess.sftp().with_context(|| format!("Unable to create the next channel at {} to dst url - usually limited to 10 so set --threads to 8 maybe", i + 2))?;
             (Some(src), Some(dst))
         } else {
-            warn!("Creating new session: {}", i + 1);
             // this forces the transfer thread to create it's own session
             (None, None)
         };
@@ -181,15 +183,15 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStat, perm: i32, s
     }
 
     let size = if cli_c.threaded_copy {
-        let mut f_in = Arc::new(Mutex::new(src.open(&path)?));
+        let mut f_in = Arc::new(Mutex::new(src.open(&path).context("open src file - tcopy")?));
         let mut f_out = Arc::new(Mutex::new(dst.open_mode(&tmp_path,
-                                                                                   OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?));
+                                                                                   OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File).context("opening dst file - tcopy")?));
         copier::copier(cli_c.threaded_copy_fill_buffer, &mut f_in, &mut f_out, cli_c.copy_buffer_size, cli_c.buffer_ring_size)?
     } else {
-        let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path)?);
+        let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path).with_context(|| format!("opening src file direct: {}", path.display()))?);
         let mut f_out = BufWriter::with_capacity(copy_buffer_size,
                                                                      dst.open_mode(&tmp_path,
-                                                                                   OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File)?);
+                                                                                   OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File).context("opening dst file direct")?);
         std::io::copy(&mut f_in, &mut f_out)? as usize
     };
 
@@ -232,8 +234,8 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>
     let (l_src, l_dst) = if src.is_some() {
         (src.unwrap(), dst.unwrap())
     } else {
-        let src = create_sftp(&cli_c.src_url, &cli_c.src_pk, cli_c.timeout)?;
-        let dst = create_sftp(&cli_c.dst_url, &cli_c.dst_pk, cli_c.timeout)?;
+        let src = create_sftp(&cli_c.src_url, &cli_c.src_pk, cli_c.timeout).context("creating src session")?;
+        let dst = create_sftp(&cli_c.dst_url, &cli_c.dst_pk, cli_c.timeout).context("creating dst session")?;
         info!("creating src/dst sessions");
 
         (src.1, dst.1)
@@ -242,7 +244,7 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>
     let mut count = 0u64;
     let mut size = 0u64;
     loop {
-        let p = recv_c.recv()?;
+        let p = recv_c.recv().context("receiving next entry in channel")?;
         match p {
             None => return Ok((count, size)),
             Some((path, filestat)) => {
@@ -271,7 +273,21 @@ fn get_file_age(path: &PathBuf, filestat: &FileStat) -> Duration {
 
 fn lister_thread(cli: &Arc<Cli>, src: Sftp, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStat)>>) -> Result<u64> {
     let mut count_files_listed = 0u64;
-    for (path, filestat) in src.readdir(&PathBuf::from(cli.src_url.path()))? {
+    let dir_path = &PathBuf::from(cli.src_url.path());
+    let (this_dir, par_dir) = (Path::new("."), Path::new(".."));
+    let mut dir = src.opendir(&dir_path)?;
+    loop {
+        let (path, filestat) = match dir.readdir() {
+            Ok((filename, stat)) => {
+                if &*filename == this_dir || &*filename == par_dir {
+                    continue;
+                }
+                (dir_path.join(&filename), stat)
+            },
+            Err(ref e) if e.code() == LIBSSH2_ERROR_FILE => break,
+            Err(e) => return Err(anyhow!("error on next readdir: {}", e)),
+        };
+
         count_files_listed += 1;
         if filestat.is_file() {
             trace!("considering file: {}", &path.display());
