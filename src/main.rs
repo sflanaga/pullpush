@@ -35,7 +35,29 @@ mod track;
 mod copier;
 mod vfs;
 
+#[derive(Debug)]
+pub struct Stats {
+    pub xfer_count: AtomicUsize,
+    pub path_check: AtomicUsize,
+    pub stat_check: AtomicUsize,
+    pub never2xfer: AtomicUsize,
+    pub too_young: AtomicUsize,
+}
+
+use lazy_static::lazy_static;
+
+lazy_static!{
+    pub static ref STATS: Stats = Stats {
+        xfer_count: AtomicUsize::new(0),
+        path_check: AtomicUsize::new(0),
+        stat_check: AtomicUsize::new(0),
+        never2xfer: AtomicUsize::new(0),
+        too_young: AtomicUsize::new(0),
+    };
+}
+
 use vfs::{Vfs, create_vfs, VfsFile, FileStatus, FileType};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 
@@ -131,6 +153,8 @@ fn run() -> Result<()> {
     info!("listed {} entries, trans: {} files  {:.3} MB in {:.3} secs", count_files_listed, count, mb, start.elapsed().as_secs_f64());
     tracker.write().unwrap().commit()?;
 
+    info!("STATS: {:#?}", *STATS);
+
     Ok(())
 }
 
@@ -186,6 +210,7 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>
             None => return Ok((count, size)),
             Some((path, filestat)) => {
                 let (c, s) = xfer_file(&cli, &path, &filestat, &src, &dst, &cli.dst_url, cli.copy_buffer_size)?;
+                STATS.xfer_count.fetch_add(1, Ordering::Relaxed);
                 size += s;
                 count += c;
                 tracker.write().unwrap().xferred(&path, filestat)?;
@@ -251,6 +276,8 @@ fn get_file_age(path: &PathBuf, filestat: &FileStatus) -> Duration {
 
 fn keep_path(cli: &Arc<Cli>, path: &PathBuf, tracker: &Arc<RwLock<Tracker>>) -> Result<bool> {
 
+    STATS.path_check.fetch_add(1, Ordering::Relaxed);
+
     let s = match path.file_name() {
         None => {
             error!("Cannot map path to a filename - weird \"{}\"", &path.display());
@@ -281,20 +308,26 @@ fn keep_path(cli: &Arc<Cli>, path: &PathBuf, tracker: &Arc<RwLock<Tracker>>) -> 
     Ok(true)
 }
 
-fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus) -> Result<bool> {
+const FILE_TOO_OLD:u32 = 1;
+const FILE_TOO_YOUNG:u32 = 2;
+const FILE_NOT_A_FILE:u32=4;
+
+fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus) -> Result<u32> {
+    STATS.stat_check.fetch_add(1, Ordering::Relaxed);
+
     if filestatus.file_type==vfs::FileType::Regular {
         let age = get_file_age(&path, &filestatus);
         if age > cli.max_age {
             trace!("file \"{}\" too old at {:?}", &path.display(), age);
-            return Ok(false);
+            return Ok(FILE_TOO_OLD);
         } else if age < cli.min_age {
             trace!("file \"{}\" too new at {:?}", &path.display(), age);
-            return Ok(false);
+            return Ok(FILE_TOO_YOUNG);
         }
-        Ok(true)
+        Ok(0)
     } else {
         trace!("dir: {}", &path.display());
-        return Ok(false);
+        return Ok(FILE_NOT_A_FILE);
     }
 
 }
@@ -317,7 +350,6 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
     let mut dir = src.open_dir(&dir_path).with_context(|| format!("open dir on base directory: {}", dir_path.display()))?;
 
     let mut xfer_list = vec![];
-    let mut path_list = vec![];
     let mut with_stat_list = vec![];
     loop {
         match dir.next_dir_entry().context("error on next_dir_entry")? {
@@ -334,33 +366,35 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
                             stat
                         },
                     };
-                    if keep_status(&cli, &path, filestatus)? {
+                    let k_s = keep_status(&cli, &path, filestatus)?;
+                    if k_s & FILE_NOT_A_FILE != 0 || k_s & FILE_TOO_OLD != 0 {
+                        // these file should never be transferred in the future
+                        STATS.never2xfer.fetch_add(1,Ordering::Relaxed);
+                        with_stat_list.push((path.clone(),filestatus));
+                    } else if k_s & FILE_TOO_YOUNG != 0 {
+                        STATS.too_young.fetch_add(1,Ordering::Relaxed);
+                        // do nothing but it will show up again and be old enough
+                        // and should be xferred
+                    } else {
                         if !cli.dry_run {
                             if cli.queue_as_found {
                                 trace!("queueing file: {}", path.display());
-                                send.send(Some( (path.clone(), filestatus)))?;
+                                send.send(Some((path.clone(), filestatus)))?;
                             } else {
-                                xfer_list.push( (path.clone(), filestatus.clone()) );
+                                xfer_list.push((path.clone(), filestatus.clone()));
                             }
                         } else {
-                            info!("would have xferred file: \"{}\" but writing to tracker", &path.display());
-                            with_stat_list.push((path.clone(),filestatus));
-                            //tracker.write().unwrap().insert_path_and_status(&path, filestatus)?;
+                            trace!("would have xferred file: {}", path.display());
                         }
-                    } else {
-                        with_stat_list.push((path.clone(), filestatus));
-                        //tracker.write().unwrap().insert_path_and_status(&path, filestatus)?;
                     }
-                } else {
-                    path_list.push(path.clone());
-                    //tracker.write().unwrap().insert_path(&path)?;
                 }
-
             }
         }
     }
     if !cli.queue_as_found {
         trace!("queueing all files for xfer at once");
+        let start_f = Instant::now();
+        let count = xfer_list.len();
         loop {
             match xfer_list.pop() {
                 None => break,
@@ -370,22 +404,19 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
                 },
             }
         }
+        info!("vec to queue {} time: {:?}", count, start_f.elapsed());
     }
     if cli.add_all_to_tracker {
         trace!("write just paths to track for later speeder listings");
-        loop {
-            match path_list.pop() {
-                None => break,
-                Some(p) => tracker.write().unwrap().insert_path(&p)?,
-            }
-        }
-        trace!("write path AND filestatus to track for later speeder listings");
+        let count = with_stat_list.len();
+        let start_f = Instant::now();
         loop {
             match with_stat_list.pop() {
                 None => break,
                 Some(x) => tracker.write().unwrap().insert_path_and_status(&x.0, x.1)?,
             }
         }
+        info!("vec of ignorable in future files {} to tracker time: {:?}", count, start_f.elapsed());
     }
 
 
