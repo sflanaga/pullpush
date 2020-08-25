@@ -216,7 +216,7 @@ impl VfsFile for SftpFile {
                     }
 
                     let status = FileStatus::try_from(&stat)?;
-                    return Ok(Some((self.path.join(&filename),Some(status))));
+                    return Ok(Some((self.path.join(&filename).canonicalize()?,Some(status))));
                 }
                 Err(ref e) if e.code() == LIBSSH2_ERROR_FILE => return Ok(None),
                 Err(e) => return Err(ERR!("error on next readdir: {}", e)),
@@ -235,7 +235,7 @@ impl VfsFile for LocalFile {
                 Some(r) => match r {
                     Err(e) => return Err(ERR!("error on reading next entry in ReadDir: {}", e)),
                     Ok(de) => {
-                        let filename = self.path.join(de.path());
+                        let filename = self.path.join(de.path()).canonicalize()?;
                         return Ok(Some( (filename, None) ));
                     },
                 }
