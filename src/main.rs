@@ -250,7 +250,7 @@ fn keep_path(cli: &Arc<Cli>, path: &PathBuf, tracker: &Arc<RwLock<Tracker>>) -> 
         Err(e) => return Err(anyhow!("could not read lock tracker due to {}", &e)),
         Ok(l) => {
             if l.path_exists_in_tracker(&path) {
-                trace!("file \"{}\" already in tracker", s);
+                trace!("file \"{}\" already in tracker", &path.display());
                 return Ok(false)
             }
         }
