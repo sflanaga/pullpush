@@ -349,19 +349,14 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
     trace!("opening dir: {}", dir_path.display());
     let mut dir = src.open_dir(&dir_path).with_context(|| format!("open dir on base directory: {}", dir_path.display()))?;
 
-    let mut list = vec![];
+    let mut list = dir.read_all_dir_entry().context("error on next_dir_entry")?;
+    info!("file list {} in {:?}", list.len(), start_f.elapsed());
 
     let mut xfer_list = vec![];
     let mut with_stat_list = vec![];
-    loop {
-        match dir.next_dir_entry().context("error on next_dir_entry")? {
-            None => break,
-            Some((path, o_filestat)) => list.push((path, o_filestat)),
-        }
-    }
-    info!("file list {} in {:?}", list.len(), start_f.elapsed());
 
     for (path, o_filestat) in list.iter() {
+        let path = dir_path.join(&path);
         count_files_listed += 1;
         if keep_path(&cli, &path, &tracker)? {
             let filestatus = match *o_filestat {

@@ -30,7 +30,7 @@ fn main() -> Result<()> {
     eprintln!("listing");
 
     loop {
-        match od.next_dir_entry(Some(|x|true),Some(|y| true)) {
+        match od.read_all_dir_entry(Some(|x|true), Some(|y| true)) {
             Err(e) => return Err(ERR!("could not readdir {}", e)),
             Ok(Some(path)) => eprintln!("path: {}", path.display()),
             Ok(None) => break,

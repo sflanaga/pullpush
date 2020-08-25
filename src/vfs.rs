@@ -199,14 +199,15 @@ impl TryFrom<&ssh2::FileStat> for FileStatus {
 }
 
 pub trait VfsFile {
-    fn next_dir_entry(&mut self)
-                      -> Result<Option<(PathBuf, Option<FileStatus>)>>;
+    fn read_all_dir_entry(&mut self)
+                          -> Result<Vec<(PathBuf, Option<FileStatus>)>>;
 }
 
 
 impl VfsFile for SftpFile {
-    fn next_dir_entry(&mut self) -> Result<Option<(PathBuf, Option<FileStatus>)>>
+    fn read_all_dir_entry(&mut self) -> Result<Vec<(PathBuf, Option<FileStatus>)>>
     {
+        let mut list = vec![];
         let (this_dir, par_dir) = (Path::new("."), Path::new(".."));
         loop {
             match self.file.readdir() {
@@ -216,11 +217,10 @@ impl VfsFile for SftpFile {
                     }
 
                     let status = FileStatus::try_from(&stat).context("next_dir_entry of SftpFile canon")?;
-                    let path = self.path.join(&filename);
-                    trace!("next_dir_entry sftp return: {}", path.display());
-                    return Ok(Some( (path, Some(status) )));
+                    trace!("next_dir_entry sftp return: {}", filename.display());
+                    list.push( (filename, Some(status)) );
                 }
-                Err(ref e) if e.code() == LIBSSH2_ERROR_FILE => return Ok(None),
+                Err(ref e) if e.code() == LIBSSH2_ERROR_FILE => return Ok(list),
                 Err(e) => return Err(ERR!("error on next readdir: {}", e)),
             };
         }
@@ -229,16 +229,16 @@ impl VfsFile for SftpFile {
 }
 
 impl VfsFile for LocalFile {
-    fn next_dir_entry(&mut self) -> Result<Option<(PathBuf, Option<FileStatus>)>>
+    fn read_all_dir_entry(&mut self) -> Result<Vec<(PathBuf, Option<FileStatus>)>>
     {
+        let mut list = vec![];
         loop {
             match self.itr.next() {
-                None => return Ok(None),
+                None => return Ok(list),
                 Some(r) => match r {
                     Err(e) => return Err(ERR!("error on reading next entry in ReadDir: {}", e)),
                     Ok(de) => {
-                        let filename = self.path.join(de.path()).canonicalize().context("next_dir_entry of LocalFile canon")?;
-                        return Ok(Some( (filename, None) ));
+                        list.push( (de.path(), None) );
                     },
                 }
             }
