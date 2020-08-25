@@ -24,6 +24,9 @@ debug=1
 name="ls_time"
 path="src/ls.rs"
 
+[[bin]]
+name="test_vfs"
+path="src/test_vfs.rs"
 
 [dependencies]
 regex = "1.3.9"

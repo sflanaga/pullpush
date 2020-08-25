@@ -13,6 +13,9 @@ use log::{info, debug, warn, error, trace};
 use std::cmp::Ordering;
 use std::ops::Add;
 
+use crate::vfs::{FileStatus};
+
+
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 
 #[derive(Debug, Eq, Clone)]
@@ -40,6 +43,14 @@ impl Ord for Track {
     }
 }
 
+fn u64_to_SystemTime(mtime: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH.add(Duration::from_secs(mtime))
+}
+
+fn SystemTime_to_u64(mtime: SystemTime) -> u64 {
+    let dur = mtime.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::from_secs(0));
+    dur.as_secs()
+}
 
 impl Track {
     pub fn from_str(s: &str) -> Result<Self> {
@@ -51,15 +62,11 @@ impl Track {
             size: v[2].parse().with_context(|| format!("file size number cannot be parsed in \"{}\"", s))?,
         })
     }
-    pub fn from_sftp_entry(path: &PathBuf, filestat: &FileStat) -> Result<Self> {
-        if filestat.mtime.is_none() || filestat.size.is_none() {
-            Err(anyhow!("sftp file entry provided {:?} does not have size or date attached to it", (&path, &filestat)))?
-        }
-
+    pub fn from_sftp_entry(path: &PathBuf, filestat: FileStatus) -> Result<Self> {
         Ok(Track {
             src_path: path.clone(),
-            lastmod: filestat.mtime.unwrap(),
-            size: filestat.size.unwrap(),
+            lastmod: SystemTime_to_u64(filestat.mtime),
+            size: filestat.size,
         })
     }
     fn from_just_path(path: &PathBuf) -> Self {
@@ -184,13 +191,13 @@ impl Tracker {
         Ok(())
     }
 
-    pub fn path_exist_in_tracker(&mut self, path: &PathBuf) -> bool {
+    pub fn path_exists_in_tracker(&self, path: &PathBuf) -> bool {
         let track = Track::from_just_path(&path);
         return self.set.contains(&track)
     }
 
-    pub fn check(&mut self, path: &PathBuf, filestat: &FileStat) -> Result<TrackDelta> {
-        let track = Track::from_sftp_entry(&path, &filestat)?;
+    pub fn check(&mut self, path: &PathBuf, filestat: FileStatus) -> Result<TrackDelta> {
+        let track = Track::from_sftp_entry(&path, filestat)?;
         match self.set.get(&track) {
             None => Ok(TrackDelta::None),
             Some(e) => {
@@ -205,9 +212,35 @@ impl Tracker {
         }
     }
 
-    pub fn xferred(&mut self, path: &PathBuf, filestat: &FileStat) -> Result<()> {
-        let track = Track::from_sftp_entry(&path, &filestat)
-            .with_context(|| anyhow!("Not able to add entry to tracker: {:?}", (&path, &filestat)))?;
+    /// Here we just want to record the path in the tracker so
+    /// we can filter it fast later.
+    /// We do no flushing of buffers here om the WAL
+    pub fn record_path(&mut self, path: &PathBuf) -> Result<()> {
+        let fs = FileStatus {
+            mtime: SystemTime::UNIX_EPOCH,
+            size: 0,
+            file_type: crate::vfs::FileType::Unknown,
+        };
+        let track = Track::from_sftp_entry(&path, fs)
+            .with_context(|| anyhow!("Not able to record just path to tracker: {:?}", (&path, fs)))?;
+        track.write(self.wal.as_mut().unwrap())?;
+        self.set.insert(track);
+        // NO FLUSH
+        Ok(())
+    }
+
+    pub fn record_path_and_status(&mut self, path: &PathBuf, filestat: FileStatus) -> Result<()> {
+        let track = Track::from_sftp_entry(&path, filestat)
+            .with_context(|| anyhow!("Not able to record just path to tracker: {:?}", (&path, filestat)))?;
+        track.write(self.wal.as_mut().unwrap())?;
+        self.set.insert(track);
+        // NO FLUSH
+        Ok(())
+    }
+
+    pub fn xferred(&mut self, path: &PathBuf, filestat: FileStatus) -> Result<()> {
+        let track = Track::from_sftp_entry(&path, filestat)
+            .with_context(|| anyhow!("Not able to add entry to tracker: {:?}", (&path, filestat)))?;
         track.write(self.wal.as_mut().unwrap())?;
         self.set.insert(track);
         self.wal.as_mut().unwrap().flush()?;

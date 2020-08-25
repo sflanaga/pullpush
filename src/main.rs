@@ -1,11 +1,13 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unreachable_code)]
 
 use std::io::{BufReader, BufWriter};
 use std::io::Write;
 use std::net::TcpStream;
-use std::ops::Add;
+use std::ops::{Add, Sub};
 use std::path::{PathBuf, Path};
 use std::time::{Duration, SystemTime, Instant};
 
@@ -33,6 +35,7 @@ mod track;
 mod copier;
 mod vfs;
 
+use vfs::{Vfs, create_vfs, VfsFile, FileStatus, FileType};
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 
@@ -77,8 +80,11 @@ fn run() -> Result<()> {
     builder.init();
 
     info!("creating sftp connections");
-    let (src_sess, src) = create_sftp(&cli.src_url, &cli.src_pk, cli.timeout)?;
-    let (dst_sess, _dst) = create_sftp(&cli.dst_url, &cli.dst_pk, cli.timeout)?;
+
+    let mut src = vfs::create_vfs(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?;
+    // we do not use this dst but it is done to make sure the downstream can connect before too much machinery
+    // get going.  Might be removed later.
+    let mut dst = vfs::create_vfs(&cli.dst_url, cli.dst_perm, &cli.dst_pk, Some(cli.timeout))?;
 
     let tracker = Arc::new(RwLock::new(Tracker::new(&cli.track, cli.max_track_age)?));
 
@@ -90,16 +96,7 @@ fn run() -> Result<()> {
         let cli_c = cli.clone();
         let mut tracker_c = tracker.clone();
 
-        let (src, dst) = if cli.reuse_sessions {
-            warn!("Creating new session src/dst sessions: {}", i + 1);
-            let src = src_sess.sftp().with_context(|| format!("Unable to create the next channel at {} to src url - usually limited to 10 so set --threads to 8 maybe", i + 2))?;
-            let dst = dst_sess.sftp().with_context(|| format!("Unable to create the next channel at {} to dst url - usually limited to 10 so set --threads to 8 maybe", i + 2))?;
-            (Some(src), Some(dst))
-        } else {
-            // this forces the transfer thread to create it's own session
-            (None, None)
-        };
-        let h = Builder::new().name(format!("{}:{}", "xfer", i)).spawn(move || xferring(&recv_c, &cli_c, src, dst, &mut tracker_c)).unwrap();
+        let h = Builder::new().name(format!("{}:{}", "xfer", i)).spawn(move || xferring(&recv_c, &cli_c, &mut tracker_c)).unwrap();
         xfer_threads.push(h);
     }
 
@@ -111,6 +108,7 @@ fn run() -> Result<()> {
 
     let h_lister_thread = {
         let (cli_c, tracker_c, send_c) = (cli.clone(), tracker.clone(), send.clone());
+
         Builder::new().name("lister".to_string()).spawn(move || lister_thread(&cli_c, src, &tracker_c, &send_c)).unwrap()
     };
 
@@ -164,8 +162,38 @@ fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session, S
     Ok((sess, sftp))
 }
 
+fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli_c: &Arc<Cli>, tracker: &mut Arc<RwLock<Tracker>>) -> (u64, u64) {
+    match xferring_inn(recv_c, cli_c, tracker) {
+        Err(e) => {
+            error!("sending thread died: {:#?} - maybe the others will get it down this round", e);
+            (0, 0)
+        }
+        Ok(x) => x,
+    }
+}
 
-fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStat, perm: i32, src: &Sftp, dst: &Sftp, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
+fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>, tracker: &mut Arc<RwLock<Tracker>>) -> Result<(u64, u64)> {
+    let src = vfs::create_vfs(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?;
+    let dst = vfs::create_vfs(&cli.dst_url, cli.dst_perm, &cli.dst_pk, Some(cli.timeout))?;
+
+    let mut count = 0u64;
+    let mut size = 0u64;
+    loop {
+        let p = recv_c.recv().context("receiving next entry in channel")?;
+        match p {
+            None => return Ok((count, size)),
+            Some((path, filestat)) => {
+                let (c, s) = xfer_file(&cli, &path, &filestat, &src, &dst, &cli.dst_url, cli.copy_buffer_size)?;
+                size += s;
+                count += c;
+                tracker.write().unwrap().xferred(&path, filestat)?;
+            }
+        }
+    }
+    // Ok((count, size))
+}
+
+fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Box<dyn Vfs + Send>, dst: &Box<dyn Vfs + Send>, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
     let mut dst_path = PathBuf::from(dst_url.path());
     let mut tmp_path = PathBuf::from(dst_url.path());
     let name = path.file_name().unwrap().to_str().unwrap();
@@ -182,20 +210,18 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStat, perm: i32, s
         }
     }
 
-    let size = if cli_c.threaded_copy {
-        let mut f_in = Arc::new(Mutex::new(src.open(&path).context("open src file - tcopy")?));
-        let mut f_out = Arc::new(Mutex::new(dst.open_mode(&tmp_path,
-                                                                                   OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File).context("opening dst file - tcopy")?));
-        copier::copier(cli_c.threaded_copy_fill_buffer, &mut f_in, &mut f_out, cli_c.copy_buffer_size, cli_c.buffer_ring_size)?
-    } else {
-        let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path).with_context(|| format!("opening src file direct: {}", path.display()))?);
-        let mut f_out = BufWriter::with_capacity(copy_buffer_size,
-                                                                     dst.open_mode(&tmp_path,
-                                                                                   OpenFlags::WRITE | OpenFlags::TRUNCATE, perm, OpenType::File).context("opening dst file direct")?);
-        std::io::copy(&mut f_in, &mut f_out)? as usize
-    };
+    // let size = if cli_c.threaded_copy {
+    //     let mut f_in = Arc::new(Mutex::new(src.open(&path).context("open src file - tcopy")?));
+    //     let mut f_out = Arc::new(Mutex::new(dst.create(&tmp_path).context("opening dst file - tcopy")?));
+    //     copier::copier(cli_c.threaded_copy_fill_buffer, &mut f_in, &mut f_out, cli_c.copy_buffer_size, cli_c.buffer_ring_size)?
+    // } else {
+    let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path).with_context(|| format!("opening src file direct: {}", path.display()))?);
+    let mut f_out = BufWriter::with_capacity(copy_buffer_size,
+                                             dst.create(&tmp_path).context("opening dst file direct")?);
+    let size = std::io::copy(&mut f_in, &mut f_out)? as usize;
+    // };
 
-    match dst.rename(&tmp_path, &dst_path, None) {
+    match dst.rename(&tmp_path, &dst_path) {
         Err(e) => error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {:?}", &tmp_path.display(), &dst_path.display(), e),
         Ok(()) => {
             let t = timer.elapsed().as_secs_f64();
@@ -205,140 +231,110 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStat, perm: i32, s
         }
     }
 
-    let mut newstats = FileStat { perm: Some(perm as u32), mtime: None, size: None, atime: None, gid: None, uid: None };
-    dst.setstat(&dst_path, newstats)?;
-
-    /* for now setting time remotely does not seem to work - here's what I tried:
-
-    let mut newstats = FileStat {perm: None, mtime: Some(filestat.mtime.unwrap()), size: None, atime: None, gid: None, uid: None};
-    dst.setstat(&dst_path, newstats)?;
-
-     */
+    dst.set_perm(&dst_path)?;
 
     Ok((1, size as u64))
 }
 
-
-
-fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Option<Sftp>, dst: Option<Sftp>, tracker: &mut Arc<RwLock<Tracker>>) -> (u64, u64) {
-    match xferring_inn(recv_c, cli_c, src, dst, tracker) {
-        Err(e) => {
-            error!("sending thread died: {:#?} - maybe the others will get it down this round", e);
-            (0, 0)
-        }
-        Ok(x) => x,
-    }
-}
-
-fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStat)>>, cli_c: &Arc<Cli>, src: Option<Sftp>, dst: Option<Sftp>, tracker: &mut Arc<RwLock<Tracker>>) -> Result<(u64, u64)> {
-    let (l_src, l_dst) = if src.is_some() {
-        (src.unwrap(), dst.unwrap())
-    } else {
-        let src = create_sftp(&cli_c.src_url, &cli_c.src_pk, cli_c.timeout).context("creating src session")?;
-        let dst = create_sftp(&cli_c.dst_url, &cli_c.dst_pk, cli_c.timeout).context("creating dst session")?;
-        info!("creating src/dst sessions");
-
-        (src.1, dst.1)
-    };
-
-    let mut count = 0u64;
-    let mut size = 0u64;
-    loop {
-        let p = recv_c.recv().context("receiving next entry in channel")?;
-        match p {
-            None => return Ok((count, size)),
-            Some((path, filestat)) => {
-                let (c, s) = xfer_file(&cli_c, &path, &filestat, cli_c.dst_perm, &l_src, &l_dst, &cli_c.dst_url, cli_c.copy_buffer_size)?;
-                size += s;
-                count += c;
-                tracker.write().unwrap().xferred(&path, &filestat)?;
-            }
-        }
-    }
-    // Ok((count, size))
-}
-
-fn get_file_age(path: &PathBuf, filestat: &FileStat) -> Duration {
-    let now = SystemTime::now();
-    let ft = SystemTime::UNIX_EPOCH.add(Duration::from_secs(filestat.mtime.unwrap()));
-
-    match now.duration_since(ft) {
+fn get_file_age(path: &PathBuf, filestat: &FileStatus) -> Duration {
+    match SystemTime::now().duration_since(filestat.mtime) {
         Err(e) => {
             warn!("got \"future\" time for path \"{}\", so assuming 0 age.  {:#?}", path.display(), &e);
             Duration::from_secs(0)
-        }, // pretend its now
+        } // pretend its now
         Ok(dur) => dur,
     }
 }
 
-fn lister_thread(cli: &Arc<Cli>, src: Sftp, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStat)>>) -> Result<u64> {
-    let mut count_files_listed = 0u64;
-    let dir_path = &PathBuf::from(cli.src_url.path());
-    let (this_dir, par_dir) = (Path::new("."), Path::new(".."));
-    let mut dir = src.opendir(&dir_path)?;
-    loop {
-        let (path, filestat) = match dir.readdir() {
-            Ok((filename, stat)) => {
-                if &*filename == this_dir || &*filename == par_dir {
-                    continue;
-                }
-                (dir_path.join(&filename), stat)
-            },
-            Err(ref e) if e.code() == LIBSSH2_ERROR_FILE => break,
-            Err(e) => return Err(anyhow!("error on next readdir: {}", e)),
-        };
 
-        count_files_listed += 1;
-        if filestat.is_file() {
-            trace!("considering file: {}", &path.display());
-            let s = path.file_name()
-                .ok_or(anyhow!("Cannot map path to a filename - weird \"{}\"", &path.display()))?.to_str().unwrap();
-            let age = get_file_age(&path, &filestat);
-            if age > cli.max_age {
-                trace!("file \"{}\" to old at {:?}", &path.display(), age);
-            } else if age < cli.min_age {
-                trace!("file \"{}\" to new at {:?}", &path.display(), age);
-            } else if s.starts_with('.') && !cli.include_dot_files {
-                trace!("file \"{}\" excluded as a dot file or hidden", &path.display());
-            } else {
-                trace!("file \"{}\" has good age at {:?}", &path.display(), age);
-                if cli.re.is_match(s) {
-                    let xfer = match tracker.write().unwrap().check(&path, &filestat)? {
-                        TrackDelta::None => {
-                            trace!("transferring file \"{}\" not in tracker", &path.display());
-                            true
-                        }
-                        TrackDelta::LastModChange => {
-                            trace!("not transferring file \"{}\" but last mod time has changed", &path.display());
-                            false
-                        }
-                        TrackDelta::SizeChange => {
-                            trace!("not transferring file \"{}\" but size has changed", &path.display());
-                            false
-                        }
-                        TrackDelta::Equal => {
-                            trace!("skipping file \"{}\" has already transferred according to tracking set", &path.display());
-                            false
-                        }
-                    };
-                    if xfer {
-                        if !cli.dry_run {
-                            send.send(Some((path.clone(), filestat.clone())))?;
-                        } else {
-                            info!("would have xferred file: \"{}\"", &path.display());
-                            tracker.write().unwrap().xferred(&path, &filestat)?;
-                        }
-                    }
-                } else {
-                    trace!("file \"{}\" does not match RE", s);
-                }
+fn keep_path(cli: &Arc<Cli>, path: &PathBuf, tracker: &Arc<RwLock<Tracker>>) -> Result<bool> {
+    let s = match path.file_name() {
+        None => {
+            error!("Cannot map path to a filename - weird \"{}\"", &path.display());
+            return Ok(false);
+        }
+        Some(s) => s.to_string_lossy(),
+    };
+
+    if s.starts_with('.') && !cli.include_dot_files {
+        trace!("file \"{}\" excluded as a dot file or hidden", &path.display());
+        return Ok(false);
+    }
+    if !cli.re.is_match(&s) {
+        trace!("file \"{}\" does not match RE", s);
+        return Ok(false);
+    }
+    match tracker.read() {
+        Err(e) => return Err(anyhow!("could not read lock tracker due to {}", &e)),
+        Ok(l) => {
+            if l.path_exists_in_tracker(&path) {
+                trace!("file \"{}\" already in tracker", s);
+                return Ok(false)
             }
-        } else if filestat.is_dir() {
-            trace!("dir: {}", &path.display());
-        } else {
-            let ft = &filestat.size.unwrap();
-            trace!("not a dir or file: {}  size: {}", &path.display(), *ft);
         }
     }
+    Ok(true)
+}
+
+fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus) -> Result<bool> {
+    if filestatus.file_type==vfs::FileType::Regular {
+        let age = get_file_age(&path, &filestatus);
+        if age > cli.max_age {
+            trace!("file \"{}\" to old at {:?}", &path.display(), age);
+            return Ok(false);
+        } else if age < cli.min_age {
+            trace!("file \"{}\" to new at {:?}", &path.display(), age);
+            return Ok(false);
+        }
+        Ok(true)
+    } else {
+        trace!("dir: {}", &path.display());
+        return Ok(false);
+    }
+
+}
+
+fn lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<u64> {
+
+    let mut count_files_listed = 0u64;
+    let mut count_files_stat_ed = 0u64;
+    let dir_path = &PathBuf::from(cli.src_url.path());
+    let (this_dir, par_dir) = (Path::new("."), Path::new(".."));
+    let mut dir = src.open_dir(&dir_path)?;
+
+    loop {
+        match dir.next_dir_entry()? {
+            None => break,
+            Some( (path, o_filestat)) => {
+                count_files_listed += 1;
+                if keep_path(&cli, &path, &tracker)? {
+                    let filestatus = match o_filestat {
+                        None => {
+                            count_files_stat_ed += 1;
+                            src.stat(&path)?
+                        },
+                        Some(stat) => {
+                            stat
+                        },
+                    };
+                    if keep_status(&cli, &path, filestatus)? {
+                        if !cli.dry_run {
+                            send.send(Some((path.clone(), filestatus.clone())))?;
+                        } else {
+                            info!("would have xferred file: \"{}\" but writing to tracker", &path.display());
+                            tracker.write().unwrap().record_path_and_status(&path, filestatus)?;
+                        }
+                    } else {
+                        tracker.write().unwrap().record_path_and_status(&path,filestatus)?;
+                    }
+                } else {
+                    tracker.write().unwrap().record_path(&path)?;
+                }
+
+            }
+        }
+    }
+
+    info!("lister thread returning after listing {} files and local stat'ings of {}", count_files_listed, count_files_stat_ed);
     Ok(count_files_listed)
 }

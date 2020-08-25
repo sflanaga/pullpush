@@ -31,15 +31,15 @@ pub struct Cli {
 
     #[structopt(long)]
     /// source private key files
-    pub src_pk: PathBuf,
+    pub src_pk: Option<PathBuf>,
 
     #[structopt(long)]
     /// destination private key files
-    pub dst_pk: PathBuf,
+    pub dst_pk: Option<PathBuf>,
 
-    #[structopt(long, default_value("644"), parse(try_from_str = to_perm))]
-    /// destination permissions in octal
-    pub dst_perm: i32,
+    #[structopt(long, parse(try_from_str = to_perm))]
+    /// destination permissions in octal like 777
+    pub dst_perm: Option<u32>,
 
     #[structopt(long)]
     /// regular expression on filename of files to keep
@@ -113,16 +113,27 @@ pub struct Cli {
     /// Number of transfer threads and also connections used + 1 to source
     pub threads: usize,
 
+    // #[structopt(long)]
+    // /// Create sftp channels from a single session
+    // ///
+    // /// By default each transfer thread creates it's down session for performance.
+    // /// This changes things so that each thread re-uses a single session, but creates
+    // /// a seperate channel for each thread instaed.  This can slow down transfers,
+    // /// but minimizes the number of sessions to remote dest.
+    // /// While the channels do allow multiple exchanges in flight, they do seem
+    // /// to limit performance.
+    // pub reuse_sessions: bool,
+
     #[structopt(long)]
-    /// Create sftp channels from a single session
+    /// If the size or last mod on the file change then send and/or overwrite downstream
     ///
-    /// By default each transfer thread creates it's down session for performance.
-    /// This changes things so that each thread re-uses a single session, but creates
-    /// a seperate channel for each thread instaed.  This can slow down transfers,
-    /// but minimizes the number of sessions to remote dest.
-    /// While the channels do allow multiple exchanges in flight, they do seem
-    /// to limit performance.
-    pub reuse_sessions: bool,
+    /// NOT yet implemented.
+    /// By default only the path is check against the list
+    /// and not the status of the file.
+    /// This is faster as path listing of local files is 2X faster in some cases
+    /// than also getting the metadata on the file.
+    /// However, there is not performance different if the source is remote.
+    pub overwrite_if_stats_change: bool,
 
     #[structopt(long)]
     /// Include hidden files or files starting with '.'
@@ -138,8 +149,8 @@ pub struct Cli {
     pub quiet: bool,
 }
 
-fn to_perm(s: &str) -> Result<i32> {
-    Ok(i32::from_str_radix(&s, 8)?)
+fn to_perm(s: &str) -> Result<u32> {
+    Ok(u32::from_str_radix(&s, 8)?)
 }
 
 fn to_duration(s: &str) -> Result<Duration> {
