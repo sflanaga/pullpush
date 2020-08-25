@@ -235,7 +235,7 @@ impl VfsFile for LocalFile {
                 Some(r) => match r {
                     Err(e) => return Err(ERR!("error on reading next entry in ReadDir: {}", e)),
                     Ok(de) => {
-                        let filename = de.path();
+                        let filename = self.path.join(de.path());
                         return Ok(Some( (filename, None) ));
                     },
                 }
