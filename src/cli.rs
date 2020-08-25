@@ -125,9 +125,29 @@ pub struct Cli {
     // pub reuse_sessions: bool,
 
     #[structopt(long)]
-    /// If the size or last mod on the file change then send and/or overwrite downstream
+    /// queue files to xfer while still listing other files
     ///
-    /// NOT yet implemented.
+    /// In some cases the xfer might interfere with the listing performance.
+    /// However, this allows files to start flowing before the listing
+    /// finishes, so it may be useful in some situations.  Honestly, this was
+    /// added to figure out which works best.
+    pub queue_as_found: bool,
+
+    #[structopt(long)]
+    /// everyfile listed will be added to lister to make future listing faster
+    ///
+    /// By default only xferred file are transferred.  This is genenrally safer.
+    /// However, often you may want to exclude future files from lstat checks
+    /// for performance in reading very slow/long directories.
+    /// By using this feature you will track every file seen and not just those
+    /// that have been tracked.  So, if you change the settings in terms of
+    /// regex or file age LATER ON, the files already seen will NOT be transferred
+    /// You might want this - you might not - think about it before using.
+    pub add_all_to_tracker: bool,
+
+    #[structopt(long)]
+    /// NOT yet implemented -- If the size or last mod on the file change then send and/or overwrite downstream
+    ///
     /// By default only the path is check against the list
     /// and not the status of the file.
     /// This is faster as path listing of local files is 2X faster in some cases

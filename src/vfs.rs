@@ -115,7 +115,7 @@ impl Vfs for SftpVfs {
 
 impl Vfs for LocalVfs {
     fn open_dir(&mut self, path: &Path) -> Result<Box<dyn VfsFile>> {
-        let r = std::fs::read_dir(&path)?;
+        let r = std::fs::read_dir(&path).context(line!())?;
         Ok(Box::new(LocalFile { path: path.to_path_buf(), itr: r }))
     }
     fn base_dir(&self) -> &PathBuf {
@@ -215,8 +215,10 @@ impl VfsFile for SftpFile {
                         continue;
                     }
 
-                    let status = FileStatus::try_from(&stat)?;
-                    return Ok(Some((self.path.join(&filename).canonicalize()?,Some(status))));
+                    let status = FileStatus::try_from(&stat).context("next_dir_entry of SftpFile canon")?;
+                    let path = self.path.join(&filename);
+                    trace!("next_dir_entry sftp return: {}", path.display());
+                    return Ok(Some( (path, Some(status) )));
                 }
                 Err(ref e) if e.code() == LIBSSH2_ERROR_FILE => return Ok(None),
                 Err(e) => return Err(ERR!("error on next readdir: {}", e)),
@@ -235,7 +237,7 @@ impl VfsFile for LocalFile {
                 Some(r) => match r {
                     Err(e) => return Err(ERR!("error on reading next entry in ReadDir: {}", e)),
                     Ok(de) => {
-                        let filename = self.path.join(de.path()).canonicalize()?;
+                        let filename = self.path.join(de.path()).canonicalize().context("next_dir_entry of LocalFile canon")?;
                         return Ok(Some( (filename, None) ));
                     },
                 }

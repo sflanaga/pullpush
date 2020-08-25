@@ -41,7 +41,7 @@ type Result<T> = anyhow::Result<T, anyhow::Error>;
 
 fn main() {
     if let Err(err) = run() {
-        error!("Error: {} / {:?} / {:#?}", &err, &err, &err);
+        error!("Error: {}\n{:?}\n{:#?}", &err, &err, &err);
         std::process::exit(1);
     }
 }
@@ -53,6 +53,9 @@ fn run() -> Result<()> {
         check_url(&cli.dst_url)?;
         if cli.verbosity == 0 {
             cli.verbosity = 2;
+        }
+        if cli.overwrite_if_stats_change {
+            return Err(anyhow!("overwrite_if_stats_change not supported yet"));
         }
         cli
     });
@@ -106,9 +109,10 @@ fn run() -> Result<()> {
 
     let h_lister_thread = {
         let (cli_c, tracker_c, send_c) = (cli.clone(), tracker.clone(), send.clone());
-
-        Builder::new().name("lister".to_string()).spawn(move || lister_thread(&cli_c, src, &tracker_c, &send_c)).unwrap()
+        trace!("starting lister thread");
+        Builder::new().name("lister".to_string()).spawn(move || lister_thread(&cli_c, src, &tracker_c, &send_c)).context("lister thread start failed")?
     };
+    trace!("lister started");
 
     info!("lister completed listing: {} entries in {:.3} seconds", h_lister_thread.join().unwrap()?, now.elapsed()?.as_secs_f64());
 
@@ -281,10 +285,10 @@ fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus) -> Result
     if filestatus.file_type==vfs::FileType::Regular {
         let age = get_file_age(&path, &filestatus);
         if age > cli.max_age {
-            trace!("file \"{}\" to old at {:?}", &path.display(), age);
+            trace!("file \"{}\" too old at {:?}", &path.display(), age);
             return Ok(false);
         } else if age < cli.min_age {
-            trace!("file \"{}\" to new at {:?}", &path.display(), age);
+            trace!("file \"{}\" too new at {:?}", &path.display(), age);
             return Ok(false);
         }
         Ok(true)
@@ -294,17 +298,29 @@ fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus) -> Result
     }
 
 }
-
 fn lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<u64> {
+    match inner_lister_thread(cli, src, tracker,send) {
+        Err(e) => {
+            error!("lister thread failed: {:?}", e);
+            return Err(e);
+        },
+        Ok(c) => return Ok(c),
+    }
+}
+
+fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<u64> {
     let start_f = Instant::now();
     let mut count_files_listed = 0u64;
     let mut count_files_stat_ed = 0u64;
     let dir_path = &PathBuf::from(cli.src_url.path());
-    let (this_dir, par_dir) = (Path::new("."), Path::new(".."));
-    let mut dir = src.open_dir(&dir_path)?;
+    trace!("opening dir: {}", dir_path.display());
+    let mut dir = src.open_dir(&dir_path).with_context(|| format!("open dir on base directory: {}", dir_path.display()))?;
 
+    let mut xfer_list = vec![];
+    let mut path_list = vec![];
+    let mut with_stat_list = vec![];
     loop {
-        match dir.next_dir_entry()? {
+        match dir.next_dir_entry().context("error on next_dir_entry")? {
             None => break,
             Some( (path, o_filestat)) => {
                 count_files_listed += 1;
@@ -320,21 +336,59 @@ fn lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &Arc<RwL
                     };
                     if keep_status(&cli, &path, filestatus)? {
                         if !cli.dry_run {
-                            send.send(Some((path.clone(), filestatus.clone())))?;
+                            if cli.queue_as_found {
+                                trace!("queueing file: {}", path.display());
+                                send.send(Some( (path.clone(), filestatus)))?;
+                            } else {
+                                xfer_list.push( (path.clone(), filestatus.clone()) );
+                            }
                         } else {
                             info!("would have xferred file: \"{}\" but writing to tracker", &path.display());
-                            tracker.write().unwrap().insert_path_and_status(&path, filestatus)?;
+                            with_stat_list.push((path.clone(),filestatus));
+                            //tracker.write().unwrap().insert_path_and_status(&path, filestatus)?;
                         }
                     } else {
-                        tracker.write().unwrap().insert_path_and_status(&path, filestatus)?;
+                        with_stat_list.push((path.clone(), filestatus));
+                        //tracker.write().unwrap().insert_path_and_status(&path, filestatus)?;
                     }
                 } else {
-                    tracker.write().unwrap().insert_path(&path)?;
+                    path_list.push(path.clone());
+                    //tracker.write().unwrap().insert_path(&path)?;
                 }
 
             }
         }
     }
+    if !cli.queue_as_found {
+        trace!("queueing all files for xfer at once");
+        loop {
+            match xfer_list.pop() {
+                None => break,
+                Some(x) => {
+                    trace!("queueing file: {}", x.0.display());
+                    send.send(Some(x))?
+                },
+            }
+        }
+    }
+    if cli.add_all_to_tracker {
+        trace!("write just paths to track for later speeder listings");
+        loop {
+            match path_list.pop() {
+                None => break,
+                Some(p) => tracker.write().unwrap().insert_path(&p)?,
+            }
+        }
+        trace!("write path AND filestatus to track for later speeder listings");
+        loop {
+            match with_stat_list.pop() {
+                None => break,
+                Some(x) => tracker.write().unwrap().insert_path_and_status(&x.0, x.1)?,
+            }
+        }
+    }
+
+
     info!("lister thread returning after {:.3} secs and listing {} files and local stat'ings of {}", start_f.elapsed().as_secs_f64(), count_files_listed, count_files_stat_ed);
     Ok(count_files_listed)
 }
