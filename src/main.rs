@@ -79,8 +79,6 @@ fn run() -> Result<()> {
 
     builder.init();
 
-    info!("creating sftp connections");
-
     let mut src = vfs::create_vfs(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?;
     // we do not use this dst but it is done to make sure the downstream can connect before too much machinery
     // get going.  Might be removed later.
@@ -102,7 +100,7 @@ fn run() -> Result<()> {
 
     let start = Instant::now();
 
-    debug!("listing remote");
+    debug!("listing source");
     let mut count_files_listed = 0;
     let now = SystemTime::now();
 
@@ -248,6 +246,16 @@ fn get_file_age(path: &PathBuf, filestat: &FileStatus) -> Duration {
 
 
 fn keep_path(cli: &Arc<Cli>, path: &PathBuf, tracker: &Arc<RwLock<Tracker>>) -> Result<bool> {
+    match tracker.read() {
+        Err(e) => return Err(anyhow!("could not read lock tracker due to {}", &e)),
+        Ok(l) => {
+            if l.path_exists_in_tracker(&path) {
+                trace!("file \"{}\" already in tracker", s);
+                return Ok(false)
+            }
+        }
+    }
+
     let s = match path.file_name() {
         None => {
             error!("Cannot map path to a filename - weird \"{}\"", &path.display());
@@ -263,15 +271,6 @@ fn keep_path(cli: &Arc<Cli>, path: &PathBuf, tracker: &Arc<RwLock<Tracker>>) -> 
     if !cli.re.is_match(&s) {
         trace!("file \"{}\" does not match RE", s);
         return Ok(false);
-    }
-    match tracker.read() {
-        Err(e) => return Err(anyhow!("could not read lock tracker due to {}", &e)),
-        Ok(l) => {
-            if l.path_exists_in_tracker(&path) {
-                trace!("file \"{}\" already in tracker", s);
-                return Ok(false)
-            }
-        }
     }
     Ok(true)
 }
@@ -295,7 +294,7 @@ fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus) -> Result
 }
 
 fn lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<u64> {
-
+    let start_f = Instant::now();
     let mut count_files_listed = 0u64;
     let mut count_files_stat_ed = 0u64;
     let dir_path = &PathBuf::from(cli.src_url.path());
@@ -334,7 +333,6 @@ fn lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &Arc<RwL
             }
         }
     }
-
-    info!("lister thread returning after listing {} files and local stat'ings of {}", count_files_listed, count_files_stat_ed);
+    info!("lister thread returning after {:.3} secs and listing {} files and local stat'ings of {}", start_f.elapsed().as_secs_f64(), count_files_listed, count_files_stat_ed);
     Ok(count_files_listed)
 }

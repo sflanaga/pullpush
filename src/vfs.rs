@@ -48,7 +48,7 @@ pub fn create_vfs(url: &Url, perm: Option<u32>, pk: &Option<PathBuf>, timeout: O
 
                     let sftp = sess.sftp().with_context(|| format!("Unable to create sftp session with private key: {} for url {}", pk.display(), &url))?;
                     sftp.lstat(&*PathBuf::from(&url.path().to_string())).with_context(|| format!("Cannot stat check remote path of \"{}\"", url))?;
-                    eprintln!("creating sftp vfs");
+                    info!("creating sftp vfs for {}", &url);
                     return Ok(Box::new(SftpVfs {
                         base_dir: PathBuf::from(url.path()),
                         sftp: sftp,
@@ -59,6 +59,7 @@ pub fn create_vfs(url: &Url, perm: Option<u32>, pk: &Option<PathBuf>, timeout: O
             }
         }
         "file" => {
+            info!("creating file vfs for {}", url);
             return Ok(Box::new(LocalVfs {
                 base_dir: PathBuf::from(url.path())
             }));
