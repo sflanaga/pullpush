@@ -246,15 +246,6 @@ fn get_file_age(path: &PathBuf, filestat: &FileStatus) -> Duration {
 
 
 fn keep_path(cli: &Arc<Cli>, path: &PathBuf, tracker: &Arc<RwLock<Tracker>>) -> Result<bool> {
-    match tracker.read() {
-        Err(e) => return Err(anyhow!("could not read lock tracker due to {}", &e)),
-        Ok(l) => {
-            if l.path_exists_in_tracker(&path) {
-                trace!("file \"{}\" already in tracker", &path.display());
-                return Ok(false)
-            }
-        }
-    }
 
     let s = match path.file_name() {
         None => {
@@ -272,6 +263,17 @@ fn keep_path(cli: &Arc<Cli>, path: &PathBuf, tracker: &Arc<RwLock<Tracker>>) -> 
         trace!("file \"{}\" does not match RE", s);
         return Ok(false);
     }
+
+    match tracker.read() {
+        Err(e) => return Err(anyhow!("could not read lock tracker due to {}", &e)),
+        Ok(l) => {
+            if l.path_exists_in_tracker(&path) {
+                trace!("file \"{}\" already in tracker", &path.display());
+                return Ok(false)
+            }
+        }
+    }
+
     Ok(true)
 }
 
