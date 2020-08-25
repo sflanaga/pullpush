@@ -3,7 +3,7 @@ use structopt::StructOpt;
 use url::Url;
 use std::path::PathBuf;
 use std::time::Duration;
-use regex::Regex;
+use pcre2::bytes::Regex;
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -41,7 +41,7 @@ pub struct Cli {
     /// destination permissions in octal like 777
     pub dst_perm: Option<u32>,
 
-    #[structopt(long)]
+    #[structopt(long, parse(try_from_str = to_regex))]
     /// regular expression on filename of files to keep
     ///
     /// ".*" means all filenames will pass
@@ -147,6 +147,13 @@ pub struct Cli {
     /// Even with things quiet there is still the tracker
     /// if you must find out what has been transferredA
     pub quiet: bool,
+}
+
+fn to_regex(s: &str) -> Result<Regex> {
+    match Regex::new(s) {
+        Err(e) => Err(anyhow!("cannot parse regex: {:?}", e)),
+        Ok(r) => Ok(r)
+    }
 }
 
 fn to_perm(s: &str) -> Result<u32> {

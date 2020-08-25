@@ -268,7 +268,7 @@ fn keep_path(cli: &Arc<Cli>, path: &PathBuf, tracker: &Arc<RwLock<Tracker>>) -> 
         trace!("file \"{}\" excluded as a dot file or hidden", &path.display());
         return Ok(false);
     }
-    if !cli.re.is_match(&s) {
+    if !cli.re.is_match(&s.as_bytes())? {
         trace!("file \"{}\" does not match RE", s);
         return Ok(false);
     }
