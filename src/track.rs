@@ -215,7 +215,7 @@ impl Tracker {
     /// Here we just want to record the path in the tracker so
     /// we can filter it fast later.
     /// We do no flushing of buffers here om the WAL
-    pub fn record_path(&mut self, path: &PathBuf) -> Result<()> {
+    pub fn insert_path(&mut self, path: &PathBuf) -> Result<()> {
         let fs = FileStatus {
             mtime: SystemTime::UNIX_EPOCH,
             size: 0,
@@ -223,18 +223,14 @@ impl Tracker {
         };
         let track = Track::from_sftp_entry(&path, fs)
             .with_context(|| anyhow!("Not able to record just path to tracker: {:?}", (&path, fs)))?;
-        track.write(self.wal.as_mut().unwrap())?;
         self.set.insert(track);
-        // NO FLUSH
         Ok(())
     }
 
-    pub fn record_path_and_status(&mut self, path: &PathBuf, filestat: FileStatus) -> Result<()> {
+    pub fn insert_path_and_status(&mut self, path: &PathBuf, filestat: FileStatus) -> Result<()> {
         let track = Track::from_sftp_entry(&path, filestat)
             .with_context(|| anyhow!("Not able to record just path to tracker: {:?}", (&path, filestat)))?;
-        track.write(self.wal.as_mut().unwrap())?;
         self.set.insert(track);
-        // NO FLUSH
         Ok(())
     }
 

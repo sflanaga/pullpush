@@ -321,13 +321,13 @@ fn lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &Arc<RwL
                             send.send(Some((path.clone(), filestatus.clone())))?;
                         } else {
                             info!("would have xferred file: \"{}\" but writing to tracker", &path.display());
-                            tracker.write().unwrap().record_path_and_status(&path, filestatus)?;
+                            tracker.write().unwrap().insert_path_and_status(&path, filestatus)?;
                         }
                     } else {
-                        tracker.write().unwrap().record_path_and_status(&path,filestatus)?;
+                        tracker.write().unwrap().insert_path_and_status(&path, filestatus)?;
                     }
                 } else {
-                    tracker.write().unwrap().record_path(&path)?;
+                    tracker.write().unwrap().insert_path(&path)?;
                 }
 
             }
