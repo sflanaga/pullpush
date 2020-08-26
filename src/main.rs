@@ -224,7 +224,7 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>
                 if !rec_1st_xfer_time {
                     let mut l = STATS.first_xfer_time.lock().unwrap();
                     if l.is_none() {
-                        l.map(|s| Instant::now());
+                        l.replace(Instant::now());
                         trace!("replace first start");
                     }
                     rec_1st_xfer_time = true;
