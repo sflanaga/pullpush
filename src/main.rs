@@ -359,6 +359,7 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
     let has_stat = list.len() > 0 && list[0].1.is_some();
 
     let mut list = if !has_stat {
+        let start_f = Instant::now();
         let mut path_checked_list = list.iter()
             .map(|(p, o)| (dir_path.join(&p), o))
             .filter(|(p, o)| {
@@ -367,13 +368,19 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
                         error!("Unable to check path {} due to {}", p.display(), e);
                         false
                     }
-                    Ok(b) => !b,
+                    Ok(keep) => keep,
                 }
             }).map(|(p, o)| p).collect::<Vec<_>>();
-        fast_stat::get_stats_fast(cli.local_file_stat_thread_pool_size, &mut path_checked_list).context("get fast stats failure")?
+        info!("check time: {:?}", start_f.elapsed());
+        let start_f = Instant::now();
+        let x = fast_stat::get_stats_fast(cli.local_file_stat_thread_pool_size, &mut path_checked_list).context("get fast stats failure")?;
+        info!("fast stats time: {:?}", start_f.elapsed());
+        x
     } else {
         list.iter().map(|(p,o)| (dir_path.join(p).clone(), o.unwrap().clone())).collect::<Vec<_>>()
     };
+
+    info!("file passing check path {}", list.len());
 
     for (path, filestatus) in list.iter() {
         let k_s = keep_status(&cli, &path, *filestatus)?;
