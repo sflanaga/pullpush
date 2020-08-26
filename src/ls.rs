@@ -28,11 +28,11 @@ pub struct Cli {
     /// limit the detailed output
     pub limit_detailed_output: usize,
 
-    #[structopt(short)]
+    #[structopt(short,long)]
     /// get metadata with each dir entry
     pub turn_on_meta_data: bool,
 
-    #[structopt(short)]
+    #[structopt(short,long)]
     /// join and normalize the path for each dir entry
     pub canonicalize: bool,
 }
