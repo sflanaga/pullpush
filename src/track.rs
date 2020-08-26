@@ -3,7 +3,7 @@
 // #![allow(unused_variables)]
 //
 use std::path::{PathBuf};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use ssh2::FileStat;
 use anyhow::{Context, anyhow};
 use std::io::{BufWriter, BufRead, Write};
@@ -14,6 +14,7 @@ use std::cmp::Ordering;
 use std::ops::Add;
 
 use crate::vfs::{FileStatus};
+use std::hash::Hasher;
 
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
@@ -23,6 +24,12 @@ struct Track {
     src_path: PathBuf,
     lastmod: u64,
     size: u64,
+}
+
+impl std::hash::Hash for Track {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.src_path.hash(state);
+    }
 }
 
 impl PartialEq for Track {
@@ -86,7 +93,7 @@ impl Track {
 
 
 pub struct Tracker {
-    set: BTreeSet<Track>,
+    set: HashSet<Track>,
     file: PathBuf,
     wal: Option<BufWriter<File>>,
 }
@@ -101,7 +108,7 @@ pub enum TrackDelta {
 
 impl Tracker {
     pub fn new(file: &PathBuf, max_track_age: Duration) -> Result<Self> {
-        let mut set = BTreeSet::new();
+        let mut set = HashSet::new();
         Tracker::entries_from(&file, &mut set, max_track_age)?;
 
         let mut filename = file.file_name().unwrap().to_owned();
@@ -137,7 +144,7 @@ impl Tracker {
         Ok(())
     }
 
-    fn write_entries(path: &PathBuf, set: &BTreeSet<Track>) -> Result<()> {
+    fn write_entries(path: &PathBuf, set: &HashSet<Track>) -> Result<()> {
         let mut tmppath = path.clone();
         let mut filename = String::from(".tmp_");
         filename.push_str(path.file_name().unwrap().to_str().unwrap());
@@ -156,7 +163,7 @@ impl Tracker {
         Ok(())
     }
 
-    fn entries_from(path: &PathBuf, set: &mut BTreeSet<Track>, max_track_age: Duration) -> Result<()> {
+    fn entries_from(path: &PathBuf, set: &mut HashSet<Track>, max_track_age: Duration) -> Result<()> {
         let now = SystemTime::now();
 
         let f_h = match File::open(&path) {

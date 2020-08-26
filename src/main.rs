@@ -374,7 +374,7 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
         info!("check time: {:?}", start_f.elapsed());
         let start_f = Instant::now();
         let x = fast_stat::get_stats_fast(cli.local_file_stat_thread_pool_size, &mut path_checked_list).context("get fast stats failure")?;
-        info!("fast stats time: {:?}", start_f.elapsed());
+        info!("fast file stat of {} in {:?}", x.len(), start_f.elapsed());
         x
     } else {
         list.iter().map(|(p,o)| (dir_path.join(p).clone(), o.unwrap().clone())).collect::<Vec<_>>()
