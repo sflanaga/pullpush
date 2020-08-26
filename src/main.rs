@@ -29,12 +29,15 @@ use env_logger::fmt::Color;
 use log::Level;
 use std::thread::Builder;
 use libssh2_sys::LIBSSH2_ERROR_FILE;
+use sema::Semaphore;
 
 mod cli;
 mod track;
 mod copier;
 mod vfs;
 mod fast_stat;
+mod sema;
+
 
 #[derive(Debug)]
 pub struct Stats {
@@ -57,6 +60,8 @@ lazy_static! {
         never2xfer: AtomicUsize::new(0),
         too_young: AtomicUsize::new(0),
     };
+
+    pub static ref SSH_SEMA: Semaphore = Semaphore::new(0);
 }
 
 use vfs::{Vfs, create_vfs, VfsFile, FileStatus, FileType};
@@ -104,8 +109,11 @@ fn run() -> Result<()> {
         (false, _) => log::LevelFilter::Trace,
     };
     builder.filter_level(log_level);
-
     builder.init();
+
+    for _ in 0..cli.number_of_ssh_startups {
+        SSH_SEMA.release();
+    }
 
     let mut src = vfs::create_vfs(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?;
     // we do not use this dst but it is done to make sure the downstream can connect before too much machinery
@@ -195,6 +203,7 @@ fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session, S
     let sftp = sess.sftp().with_context(|| format!("Unable to create sftp session with private key: {} for url {}", pk.display(), &url))?;
     sftp.lstat(&*PathBuf::from(&url.path().to_string())).with_context(|| format!("Cannot stat check remote path of \"{}\"", url))?;
 
+
     Ok((sess, sftp))
 }
 
@@ -209,8 +218,10 @@ fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli_c: &Arc<Cli>, 
 }
 
 fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>, tracker: &mut Arc<RwLock<Tracker>>) -> Result<(u64, u64)> {
-    let src = vfs::create_vfs(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?;
-    let dst = vfs::create_vfs(&cli.dst_url, cli.dst_perm, &cli.dst_pk, Some(cli.timeout))?;
+    let (src,dst) = {
+        let l = SSH_SEMA.access();
+        (vfs::create_vfs(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?,vfs::create_vfs(&cli.dst_url, cli.dst_perm, &cli.dst_pk, Some(cli.timeout))?)
+    };
 
     let mut count = 0u64;
     let mut size = 0u64;

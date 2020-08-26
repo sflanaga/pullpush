@@ -166,6 +166,11 @@ pub struct Cli {
     ///
     pub local_file_stat_thread_pool_size: usize,
 
+    #[structopt(long, default_value("4"))]
+    /// number of ssh session creations allowed to happen at a time
+    ///
+    pub number_of_ssh_startups: usize,
+
     #[structopt(long, conflicts_with("verbosity"))]
     /// Turn off any logging at all
     ///
