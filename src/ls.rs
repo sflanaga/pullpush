@@ -39,7 +39,7 @@ pub struct Cli {
 
 fn main() -> Result<()>{
     let cli:Cli = Cli::from_args();
-    println!("list {}", cli.path.display());
+    println!("args: {:?}", &cli);
 
     let mut times = Vec::with_capacity(cli.vec_pre_alloc_size);
 
