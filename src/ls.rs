@@ -29,28 +29,39 @@ pub struct Cli {
     pub limit_detailed_output: usize,
 
     #[structopt(short)]
-    /// turn off meta-data
-    pub turn_off_meta_data: bool,
+    /// get metadata with each dir entry
+    pub turn_on_meta_data: bool,
+
+    #[structopt(short)]
+    /// join and normalize the path for each dir entry
+    pub canonicalize: bool,
 }
 
 fn main() -> Result<()>{
-    let cli = Cli::from_args();
+    let cli:Cli = Cli::from_args();
     println!("list {}", cli.path.display());
 
     let mut times = Vec::with_capacity(cli.vec_pre_alloc_size);
 
     let start_t = Instant::now();
 
+    let mut path_len = 0u64;
     let mut sum_size = 0u64;
     let mut last = Instant::now();
-    for file in std::fs::read_dir(cli.path)? {
+    for file in std::fs::read_dir(&cli.path)? {
         let now = Instant::now();
         let file = file?;
-        if !cli.turn_off_meta_data {
+        if cli.turn_on_meta_data {
             let md: Metadata = file.metadata()?;
             if md.is_file() {
                 sum_size += md.len();
             }
+        }
+        if cli.canonicalize {
+            let full_path = &cli.path.join(file.path()).canonicalize()?;
+            path_len += full_path.components().count() as u64;
+        } else {
+            path_len += file.path().components().count() as u64;
         }
         times.push(now-last);
         last = Instant::now();
