@@ -34,6 +34,7 @@ mod cli;
 mod track;
 mod copier;
 mod vfs;
+mod fast_stat;
 
 #[derive(Debug)]
 pub struct Stats {
@@ -355,40 +356,46 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
     let mut xfer_list = vec![];
     let mut with_stat_list = vec![];
 
-    for (path, o_filestat) in list.iter() {
-        let path = dir_path.join(&path);
-        count_files_listed += 1;
-        if keep_path(&cli, &path, &tracker)? {
-            let filestatus = match *o_filestat {
-                None => {
-                    count_files_stat_ed += 1;
-                    src.stat(&path)?
-                }
-                Some(stat) => {
-                    stat
-                }
-            };
-            let k_s = keep_status(&cli, &path, filestatus)?;
-            count_files_stat_ed += 1;
-            if k_s & FILE_NOT_A_FILE != 0 || k_s & FILE_TOO_OLD != 0 {
-                // these file should never be transferred in the future
-                STATS.never2xfer.fetch_add(1, Ordering::Relaxed);
-                with_stat_list.push((path.clone(), filestatus));
-            } else if k_s & FILE_TOO_YOUNG != 0 {
-                STATS.too_young.fetch_add(1, Ordering::Relaxed);
-                // do nothing but it will show up again and be old enough
-                // and should be xferred
-            } else {
-                if !cli.dry_run {
-                    if cli.queue_as_found {
-                        trace!("queueing file: {}", path.display());
-                        send.send(Some((path.clone(), filestatus)))?;
-                    } else {
-                        xfer_list.push((path.clone(), filestatus.clone()));
+    let has_stat = list.len() > 0 && list[0].1.is_some();
+
+    let mut list = if !has_stat {
+        let mut path_checked_list = list.iter()
+            .map(|(p, o)| (dir_path.join(&p), o))
+            .filter(|(p, o)| {
+                match keep_path(&cli, p, &tracker) {
+                    Err(e) => {
+                        error!("Unable to check path {} due to {}", p.display(), e);
+                        false
                     }
-                } else {
-                    trace!("would have xferred file: {}", path.display());
+                    Ok(b) => !b,
                 }
+            }).map(|(p, o)| p).collect::<Vec<_>>();
+        fast_stat::get_stats_fast(cli.local_file_stat_thread_pool_size, &mut path_checked_list).context("get fast stats failure")?
+    } else {
+        list.iter().map(|(p,o)| (dir_path.join(p).clone(), o.unwrap().clone())).collect::<Vec<_>>()
+    };
+
+    for (path, filestatus) in list.iter() {
+        let k_s = keep_status(&cli, &path, *filestatus)?;
+        count_files_stat_ed += 1;
+        if k_s & FILE_NOT_A_FILE != 0 || k_s & FILE_TOO_OLD != 0 {
+            // these file should never be transferred in the future
+            STATS.never2xfer.fetch_add(1, Ordering::Relaxed);
+            with_stat_list.push((path.clone(), filestatus));
+        } else if k_s & FILE_TOO_YOUNG != 0 {
+            STATS.too_young.fetch_add(1, Ordering::Relaxed);
+            // do nothing but it will show up again and be old enough
+            // and should be xferred
+        } else {
+            if !cli.dry_run {
+                if cli.queue_as_found {
+                    trace!("queueing file: {}", path.display());
+                    send.send(Some((path.clone(), *filestatus)))?;
+                } else {
+                    xfer_list.push((path.clone(), filestatus.clone()));
+                }
+            } else {
+                trace!("would have xferred file: {}", path.display());
             }
         }
     }
@@ -414,7 +421,7 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
         loop {
             match with_stat_list.pop() {
                 None => break,
-                Some(x) => tracker.write().unwrap().insert_path_and_status(&x.0, x.1)?,
+                Some(x) => tracker.write().unwrap().insert_path_and_status(&x.0, *x.1)?,
             }
         }
         info!("vec of ignorable in future files {} to tracker in {:?}", count, start_f.elapsed());

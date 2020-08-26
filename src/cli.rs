@@ -161,6 +161,11 @@ pub struct Cli {
     /// By default hidden files are excluded
     pub include_dot_files: bool,
 
+    #[structopt(long, default_value("8"))]
+    /// thread pool size for stating local threads
+    ///
+    pub local_file_stat_thread_pool_size: usize,
+
     #[structopt(long, conflicts_with("verbosity"))]
     /// Turn off any logging at all
     ///
