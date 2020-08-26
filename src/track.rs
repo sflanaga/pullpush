@@ -8,7 +8,7 @@ use ssh2::FileStat;
 use anyhow::{Context, anyhow};
 use std::io::{BufWriter, BufRead, Write};
 use std::fs::{File, remove_file};
-use std::time::{SystemTime, Duration};
+use std::time::{SystemTime, Duration, Instant};
 use log::{info, debug, warn, error, trace};
 use std::cmp::Ordering;
 use std::ops::Add;
@@ -134,6 +134,7 @@ impl Tracker {
     }
 
     pub fn commit(&mut self) -> Result<()> {
+        let start_f = Instant::now();
         Tracker::write_entries(&self.file, &self.set)?;
 
         let mut filename = self.file.file_name().unwrap().to_owned();
@@ -141,6 +142,7 @@ impl Tracker {
         let logpath = self.file.with_file_name(filename);
         self.wal = None; // should close the file....
         remove_file(&logpath)?;
+        info!("commited {} entries to track file {} in {:?}", self.set.len(), self.file.display(), start_f.elapsed());
         Ok(())
     }
 
