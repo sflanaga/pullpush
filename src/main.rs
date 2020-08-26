@@ -38,6 +38,7 @@ mod fast_stat;
 
 #[derive(Debug)]
 pub struct Stats {
+    pub first_xfer_time: Mutex<Option<Instant>>,
     pub xfer_count: AtomicUsize,
     pub path_check: AtomicUsize,
     pub stat_check: AtomicUsize,
@@ -49,6 +50,7 @@ use lazy_static::lazy_static;
 
 lazy_static! {
     pub static ref STATS: Stats = Stats {
+        first_xfer_time: Mutex::new(None),
         xfer_count: AtomicUsize::new(0),
         path_check: AtomicUsize::new(0),
         stat_check: AtomicUsize::new(0),
@@ -127,16 +129,14 @@ fn run() -> Result<()> {
     let start = Instant::now();
 
     debug!("listing source");
-    let mut count_files_listed = 0;
     let now = SystemTime::now();
 
     let h_lister_thread = {
         let (cli_c, tracker_c, send_c) = (cli.clone(), tracker.clone(), send.clone());
-        trace!("starting lister thread");
+        debug!("starting lister thread");
         Builder::new().name("lister".to_string()).spawn(move || lister_thread(&cli_c, src, &tracker_c, &send_c)).context("lister thread start failed")?
     };
-    trace!("lister started");
-
+    trace!("lister has started");
     info!("lister completed listing: {} entries in {:.3} seconds", h_lister_thread.join().unwrap()?, now.elapsed()?.as_secs_f64());
 
     let mut count = 0u64;
@@ -151,10 +151,19 @@ fn run() -> Result<()> {
     }
 
     let mb = (size as f64) / (1024.0 * 1024.0);
-    info!("listed {} entries, trans: {} files  {:.3} MB in {:.3} secs", count_files_listed, count, mb, start.elapsed().as_secs_f64());
+
+    let first_xfer = STATS.first_xfer_time.lock().unwrap().take();
+    if first_xfer.is_some() {
+        let first_xfer = first_xfer.unwrap();
+        let rate = size as f64 / first_xfer.elapsed().as_secs_f64();
+        info!("transferred {} files {:.3} MB in {:.3} secs NOT counting list time Rate: {:.3}MB/s", count, mb, first_xfer.elapsed().as_secs_f64(), rate/(1024.0*1024.0));
+        debug!("xfer time: {:.3}", first_xfer.elapsed().as_secs_f64());
+    } else {
+        info!("transferred {} files {:.3} MB in {:.3} secs counting list time", count, mb, start.elapsed().as_secs_f64());
+    }
     tracker.write().unwrap().commit()?;
 
-    info!("STATS: {:#?}", *STATS);
+    debug!("STATS: {:#?}", *STATS);
 
     Ok(())
 }
@@ -205,11 +214,21 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>
 
     let mut count = 0u64;
     let mut size = 0u64;
+    let mut rec_1st_xfer_time = false;
     loop {
         let p = recv_c.recv().context("receiving next entry in channel")?;
         match p {
             None => return Ok((count, size)),
             Some((path, filestat)) => {
+                // record the first a file start xferring - for better xfer rate stats laters
+                if !rec_1st_xfer_time {
+                    let mut l = STATS.first_xfer_time.lock().unwrap();
+                    if l.is_none() {
+                        l.map(|s| Instant::now());
+                        trace!("replace first start");
+                    }
+                    rec_1st_xfer_time = true;
+                }
                 let (c, s) = xfer_file(&cli, &path, &filestat, &src, &dst, &cli.dst_url, cli.copy_buffer_size)?;
                 STATS.xfer_count.fetch_add(1, Ordering::Relaxed);
                 size += s;
@@ -371,7 +390,7 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
                     Ok(keep) => keep,
                 }
             }).map(|(p, o)| p).collect::<Vec<_>>();
-        info!("check time: {:?}", start_f.elapsed());
+        info!("path based checks of {} in {:?}", list.len(), start_f.elapsed());
         let start_f = Instant::now();
         let x = fast_stat::get_stats_fast(cli.local_file_stat_thread_pool_size, &mut path_checked_list).context("get fast stats failure")?;
         info!("fast file stat of {} in {:?}", x.len(), start_f.elapsed());
@@ -379,8 +398,6 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
     } else {
         list.iter().map(|(p,o)| (dir_path.join(p).clone(), o.unwrap().clone())).collect::<Vec<_>>()
     };
-
-    info!("file passing check path {}", list.len());
 
     for (path, filestatus) in list.iter() {
         let k_s = keep_status(&cli, &path, *filestatus)?;
@@ -433,7 +450,6 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
         }
         info!("vec of ignorable in future files {} to tracker in {:?}", count, start_f.elapsed());
     }
-
 
     info!("lister thread returning after {:?} secs and listing {} files and local stat'ings of {}", start_f.elapsed(), count_files_listed, count_files_stat_ed);
     Ok(count_files_listed)
