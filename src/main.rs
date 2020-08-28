@@ -64,7 +64,7 @@ lazy_static! {
     pub static ref SSH_SEMA: Semaphore = Semaphore::new(0);
 }
 
-use vfs::{Vfs, create_vfs, VfsFile, FileStatus, FileType};
+use vfs::{Vfs, ReadDirHandle, FileStatus};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
@@ -115,10 +115,10 @@ fn run() -> Result<()> {
         SSH_SEMA.release();
     }
 
-    let mut src = vfs::create_vfs(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?;
+    let mut src = vfs::Vfs::new(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?;
     // we do not use this dst but it is done to make sure the downstream can connect before too much machinery
     // get going.  Might be removed later.
-    let mut dst = vfs::create_vfs(&cli.dst_url, cli.dst_perm, &cli.dst_pk, Some(cli.timeout))?;
+    let mut dst = vfs::Vfs::new(&cli.dst_url, cli.dst_perm, &cli.dst_pk, Some(cli.timeout))?;
 
     let tracker = Arc::new(RwLock::new(Tracker::new(&cli.track, cli.max_track_age)?));
 
@@ -220,7 +220,7 @@ fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli_c: &Arc<Cli>, 
 fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>, tracker: &mut Arc<RwLock<Tracker>>) -> Result<(u64, u64)> {
     let (src,dst) = {
         let l = SSH_SEMA.access();
-        (vfs::create_vfs(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?,vfs::create_vfs(&cli.dst_url, cli.dst_perm, &cli.dst_pk, Some(cli.timeout))?)
+        (vfs::Vfs::new(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?, vfs::Vfs::new(&cli.dst_url, cli.dst_perm, &cli.dst_pk, Some(cli.timeout))?)
     };
 
     let mut count = 0u64;
@@ -251,7 +251,7 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>
     // Ok((count, size))
 }
 
-fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Box<dyn Vfs + Send>, dst: &Box<dyn Vfs + Send>, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
+fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs, dst: &Vfs, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
     let mut dst_path = PathBuf::from(dst_url.path());
     let mut tmp_path = PathBuf::from(dst_url.path());
     let name = path.file_name().unwrap().to_str().unwrap();
@@ -362,7 +362,7 @@ fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus) -> Result
     }
 }
 
-fn lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<u64> {
+fn lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<u64> {
     match inner_lister_thread(cli, src, tracker, send) {
         Err(e) => {
             error!("lister thread failed: {:?}", e);
@@ -372,7 +372,7 @@ fn lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &Arc<RwL
     }
 }
 
-fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<u64> {
+fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<u64> {
     let start_f = Instant::now();
     let mut count_files_listed = 0u64;
     let mut count_files_stat_ed = 0u64;
@@ -380,7 +380,7 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Box<dyn Vfs + Send>, tracker: &A
     trace!("opening dir: {}", dir_path.display());
     let mut dir = src.open_dir(&dir_path).with_context(|| format!("open dir on base directory: {}", dir_path.display()))?;
 
-    let mut list = dir.read_all_dir_entry().context("error on next_dir_entry")?;
+    let mut list = &dir.read_all_dir_entry().context("error on next_dir_entry")?;
     info!("file list {} in {:?}", list.len(), start_f.elapsed());
 
     let mut xfer_list = vec![];
