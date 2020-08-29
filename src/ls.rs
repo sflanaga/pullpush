@@ -37,7 +37,6 @@ structopt::clap::AppSettings::ColoredHelp,
 structopt::clap::AppSettings::UnifiedHelpMessage
 ]),
 )]
-/// test how fast you can list a directory and speed per entry
 pub struct Cli {
     #[structopt(long, default_value("100000"))]
     /// how much to pre-allocated in time tracking vector
