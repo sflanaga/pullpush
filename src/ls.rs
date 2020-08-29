@@ -50,6 +50,10 @@ pub struct Cli {
     /// limit the detailed output
     pub limit_detailed_output: usize,
 
+    #[structopt(short = "C", default_value("0"))]
+    /// set the core thread of tokio core, default to core count
+    pub core_threads: usize,
+
     #[structopt(short, long)]
     /// get metadata with each dir entry
     pub turn_on_meta_data: bool,
@@ -94,7 +98,6 @@ fn main() -> Result<()> {
     error!("time: {:?}  iter: {} GI  {} G-ops/s", start_f.elapsed(), ITR_COUNT.fetch_add(0, Ordering::Relaxed) / 1_000_000_000, rate / 1_000_000_000.0 / 16.0);
 
 
-
     Ok(())
 }
 
@@ -105,8 +108,8 @@ async fn actual(cli: Arc<Cli>) -> Result<()> {
     let mut tc_1 = thread_count.clone();
     let mut tc_2 = thread_count.clone();
 
-    let rt = tokio::runtime::Builder::new()
-        .threaded_scheduler()
+    let mut rt_bld = tokio::runtime::Builder::new();
+    rt_bld.threaded_scheduler()
         .thread_stack_size(32 * 1024)
         .on_thread_start(move || {
             let c = tc_1.fetch_add(1, Ordering::Relaxed);
@@ -115,8 +118,11 @@ async fn actual(cli: Arc<Cli>) -> Result<()> {
         .on_thread_stop(move || {
             let c = tc_2.fetch_sub(1, Ordering::Relaxed);
             debug!("THREAD STOP {}", c)
-        })
-        .build().unwrap();
+        });
+    if cli.core_threads != 0 {
+        rt_bld.core_threads(cli.core_threads);
+    }
+    let rt = rt_bld.build().unwrap();
 
 
     info!("Hello, world!");
@@ -142,15 +148,16 @@ async fn actual(cli: Arc<Cli>) -> Result<()> {
                 }
                 count += 1;
                 size += j.md.len();
-            },
+            }
         }
     }
 
-    info!("read {} entries  size: {:.3}GB", count, size as f64/((1<<30) as f64));
+    info!("read {} entries  size: {:.3}GB", count, size as f64 / ((1 << 30) as f64));
     //std::thread::sleep(Duration::from_secs(10));
     //Err(anyhow!("some made up error"))
     Ok(())
 }
+
 async fn eval_dir_entry(cli: Arc<Cli>, d: std::result::Result<DirEntry, std::io::Error>) -> Option<Job> {
     let mut size = 0u64;
     match d {
@@ -164,14 +171,14 @@ async fn eval_dir_entry(cli: Arc<Cli>, d: std::result::Result<DirEntry, std::io:
                         Err(e) => error!("cannot canonicalize path: {} {}", d.path().display(), e),
                         Ok(fullpath) => {
                             let name = d.path();
-                            return Some(Job{
+                            return Some(Job {
                                 path: name,
                                 md,
                                 full: fullpath,
-                            })
+                            });
                         }
                     }
-                },
+                }
             }
         }
     }
