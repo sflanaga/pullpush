@@ -8,28 +8,31 @@ use std::io::{BufReader, BufWriter};
 use std::io::Write;
 use std::net::TcpStream;
 use std::ops::{Add, Sub};
-use std::path::{PathBuf, Path};
-use std::time::{Duration, SystemTime, Instant};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::thread::Builder;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Context};
-use log::{debug, error, info, trace, warn, Record};
-use ssh2::{Session, Sftp, FileStat, OpenFlags, OpenType};
-use structopt::StructOpt;
-use url::Url;
-use crossbeam_channel::{Receiver, Sender};
-use track::{TrackDelta, Tracker};
-
-use crate::cli::Cli;
-use std::sync::{Arc, RwLock, Mutex};
-use std::thread;
 use chrono::Utc;
+use crossbeam_channel::{Receiver, Sender};
 use env_logger::Env;
 use env_logger::fmt::Color;
-
-use log::Level;
-use std::thread::Builder;
+use lazy_static::lazy_static;
 use libssh2_sys::LIBSSH2_ERROR_FILE;
+use log::{debug, error, info, Record, trace, warn};
+use log::Level;
+use ssh2::{FileStat, OpenFlags, OpenType, Session, Sftp};
+use structopt::StructOpt;
+use url::Url;
+
 use sema::Semaphore;
+use track::{TrackDelta, Tracker};
+use vfs::{FileStatus, ReadDirHandle, Vfs};
+
+use crate::cli::Cli;
 
 mod cli;
 mod track;
@@ -49,8 +52,6 @@ pub struct Stats {
     pub too_young: AtomicUsize,
 }
 
-use lazy_static::lazy_static;
-
 lazy_static! {
     pub static ref STATS: Stats = Stats {
         first_xfer_time: Mutex::new(None),
@@ -63,9 +64,6 @@ lazy_static! {
 
     pub static ref SSH_SEMA: Semaphore = Semaphore::new(0);
 }
-
-use vfs::{Vfs, ReadDirHandle, FileStatus};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 
