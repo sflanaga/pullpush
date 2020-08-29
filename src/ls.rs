@@ -19,15 +19,19 @@ use tokio::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering, AtomicU64};
 use log::{debug, error, info, log, Record, trace, warn};
-use lazy_static;
+use lazy_static::lazy_static;
 
 type Result<T> = std::result::Result<T, anyhow::Error>;
 
 const ITR_COUNT: AtomicU64 = AtomicU64::new(0);
 
+lazy_static! {
+    pub static ref BUILD_INFO: String  = format!("ver: {}  rev: {}  date: {}", env!("CARGO_PKG_VERSION"), env!("VERGEN_SHA_SHORT"), env!("VERGEN_BUILD_DATE"));
+}
 
 #[derive(StructOpt, Debug, Clone)]
 #[structopt(
+version = BUILD_INFO.as_str(), rename_all = "kebab-case",
 global_settings(& [
 structopt::clap::AppSettings::ColoredHelp,
 structopt::clap::AppSettings::UnifiedHelpMessage
