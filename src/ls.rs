@@ -12,7 +12,9 @@ use structopt::StructOpt;
 use std::time::Instant;
 use std::ops::Add;
 use std::time::Duration;
-use std::fs::{Metadata, DirEntry};
+use std::fs::{Metadata};
+use tokio::fs::DirEntry;
+use tokio::fs::canonicalize;
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use tokio::prelude::*;
@@ -22,6 +24,8 @@ use log::{debug, error, info, log, Record, trace, warn, LevelFilter};
 use lazy_static::lazy_static;
 use anyhow::anyhow;
 use util::to_log_level;
+use tokio::runtime::Runtime;
+
 type Result<T> = std::result::Result<T, anyhow::Error>;
 
 const ITR_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -67,7 +71,7 @@ pub struct Cli {
     /// join and normalize the path for each dir entry
     pub canonicalize: bool,
 
-    #[structopt(short="D", long, parse(try_from_str = to_log_level), default_value("info"))]
+    #[structopt(short = "D", long, parse(try_from_str = to_log_level), default_value("info"))]
     /// log level
     pub log_level: LevelFilter,
 }
@@ -99,26 +103,14 @@ fn main() -> Result<()> {
     let start_f = Instant::now();
 
     let cc = cli.clone();
-    let x = futures::executor::block_on(actual(cc))?;
 
-    let et = start_f.elapsed().as_secs_f64();
-    let iters = ITR_COUNT.fetch_add(0, Ordering::Relaxed);
-    let rate = iters as f64 / et;
-
-    error!("time: {:?}  iter: {} GI  {} G-ops/s", start_f.elapsed(), ITR_COUNT.fetch_add(0, Ordering::Relaxed) / 1_000_000_000, rate / 1_000_000_000.0 / 16.0);
-
-
-    Ok(())
-}
-
-
-async fn actual(cli: Arc<Cli>) -> Result<()> {
     let mut thread_count = Arc::new(AtomicUsize::new(0));
 
     let mut tc_1 = thread_count.clone();
     let mut tc_2 = thread_count.clone();
 
     let mut rt_bld = tokio::runtime::Builder::new();
+
     rt_bld.threaded_scheduler()
         .thread_stack_size(32 * 1024)
         .on_thread_start(move || {
@@ -132,24 +124,42 @@ async fn actual(cli: Arc<Cli>) -> Result<()> {
     if cli.core_threads != 0 {
         rt_bld.core_threads(cli.core_threads);
     }
-    let rt = rt_bld.build().unwrap();
+    let mut rt = rt_bld.build().unwrap();
+
+
+    let x = rt.block_on(actual(cc))?;
+
+    let et = start_f.elapsed().as_secs_f64();
+    let iters = ITR_COUNT.fetch_add(0, Ordering::Relaxed);
+    let rate = iters as f64 / et;
+
+    error!("time: {:?}  iter: {} GI  {} G-ops/s", start_f.elapsed(), ITR_COUNT.fetch_add(0, Ordering::Relaxed) / 1_000_000_000, rate / 1_000_000_000.0 / 16.0);
+
+
+    Ok(())
+}
+
+
+async fn actual(cli: Arc<Cli>) -> Result<()> {
 
 
     info!("Hello, world!");
     let mut v = FuturesUnordered::new();
     let mut v_i = vec![];
 
-    for d in std::fs::read_dir(&cli.path)? {
+    let mut dir = tokio::fs::read_dir(&cli.path).await?;
+
+    while let Some(x) = dir.next_entry().await? {
         let cc = cli.clone();
-        v_i.push(d);
+        v_i.push(x);
         if v_i.len() >= cli.chunk_limit {
-            v.push(rt.spawn(eval_dir_entry(cc, v_i)));
+            v.push(tokio::spawn(eval_dir_entry(cc, v_i)));
             v_i = vec![];
         }
     }
     if v_i.len() > 0 {
         let cc = cli.clone();
-        v.push(rt.spawn(eval_dir_entry(cc, v_i)));
+        v.push(tokio::spawn(eval_dir_entry(cc, v_i)));
     }
 
 
@@ -176,33 +186,28 @@ async fn actual(cli: Arc<Cli>) -> Result<()> {
     Ok(())
 }
 
-async fn eval_dir_entry(cli: Arc<Cli>, d: Vec<std::result::Result<DirEntry, std::io::Error>>) -> Vec<Job> {
+async fn eval_dir_entry(cli: Arc<Cli>, d: Vec<DirEntry>) -> Vec<Job> {
     let mut size = 0u64;
     let mut v = vec![];
     for d in d {
-        match d {
-            Err(e) => error!("error getting d entry: {}", e),
-            Ok(d) => {
-                match d.metadata() {
-                    Err(e) => error!("error getting metadata: for {} {}", d.path().display(), e),
-                    Ok(md) => {
-                        size = md.len();
-                        match cli.path.join(d.path()).canonicalize() {
-                            Err(e) => error!("cannot canonicalize path: {} {}", d.path().display(), e),
-                            Ok(fullpath) => {
-                                let name = d.path();
-                                v.push(Job {
-                                    path: name,
-                                    md,
-                                    full: fullpath,
-                                });
-                            }
-                        }
+        match d.metadata().await {
+            Err(e) => error!("error getting metadata: for {} {}", d.path().display(), e),
+            Ok(md) => {
+                size = md.len();
+                match canonicalize(cli.path.join(d.path())).await {
+                    Err(e) => error!("cannot canonicalize path: {} {}", d.path().display(), e),
+                    Ok(fullpath) => {
+                        let name = d.path();
+                        v.push(Job {
+                            path: name,
+                            md,
+                            full: fullpath,
+                        });
                     }
                 }
-            }
+            },
         }
-
     }
     return v;
+
 }
