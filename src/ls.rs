@@ -18,9 +18,10 @@ use futures::stream::FuturesUnordered;
 use tokio::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering, AtomicU64};
-use log::{debug, error, info, log, Record, trace, warn};
+use log::{debug, error, info, log, Record, trace, warn, LevelFilter};
 use lazy_static::lazy_static;
-
+use anyhow::anyhow;
+use util::to_log_level;
 type Result<T> = std::result::Result<T, anyhow::Error>;
 
 const ITR_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -65,7 +66,12 @@ pub struct Cli {
     #[structopt(short, long)]
     /// join and normalize the path for each dir entry
     pub canonicalize: bool,
+
+    #[structopt(short="D", long, parse(try_from_str = to_log_level), default_value("info"))]
+    /// log level
+    pub log_level: LevelFilter,
 }
+
 
 #[derive(Debug)]
 struct Job {
@@ -76,7 +82,7 @@ struct Job {
 
 fn main() -> Result<()> {
     let cli: Arc<Cli> = Arc::new(Cli::from_args());
-    crate::util::init_log();
+    crate::util::init_log(cli.log_level);
 
     println!("args: {:?}", &cli);
 

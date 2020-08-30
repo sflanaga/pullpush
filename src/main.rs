@@ -40,7 +40,7 @@ mod copier;
 mod vfs;
 mod fast_stat;
 mod sema;
-
+mod util;
 
 #[derive(Debug)]
 pub struct Stats {
@@ -98,15 +98,7 @@ fn run() -> Result<()> {
                  record.level(),
                  record.args())
     });
-    let log_level = match (cli.quiet, cli.verbosity) {
-        (true, _) => log::LevelFilter::Off,
-        (false, 0) => log::LevelFilter::Error,
-        (false, 1) => log::LevelFilter::Warn,
-        (false, 2) => log::LevelFilter::Info,
-        (false, 3) => log::LevelFilter::Debug,
-        (false, _) => log::LevelFilter::Trace,
-    };
-    builder.filter_level(log_level);
+    builder.filter_level(cli.log_level);
     builder.init();
 
     for _ in 0..cli.number_of_ssh_startups {

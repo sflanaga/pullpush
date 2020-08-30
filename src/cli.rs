@@ -5,6 +5,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 use pcre2::bytes::Regex;
 use lazy_static::lazy_static;
+use crate::util::to_log_level;
+use log::LevelFilter;
+
+
 
 lazy_static! {
     pub static ref BUILD_INFO: String  = format!("ver: {}  rev: {}  date: {}", env!("CARGO_PKG_VERSION"), env!("VERGEN_SHA_SHORT"), env!("VERGEN_BUILD_DATE"));
@@ -171,12 +175,9 @@ pub struct Cli {
     ///
     pub number_of_ssh_startups: usize,
 
-    #[structopt(long, conflicts_with("verbosity"))]
-    /// Turn off any logging at all
-    ///
-    /// Even with things quiet there is still the tracker
-    /// if you must find out what has been transferredA
-    pub quiet: bool,
+    #[structopt(short="v", long, parse(try_from_str = to_log_level), default_value("info"))]
+    /// log level
+    pub log_level: LevelFilter,
 }
 
 fn to_regex(s: &str) -> Result<Regex> {
