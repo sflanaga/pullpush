@@ -50,6 +50,10 @@ pub struct Cli {
     /// limit the detailed output
     pub limit_detailed_output: usize,
 
+    #[structopt(short = "L", default_value("100"))]
+    /// number of DirEntry per async call
+    pub chunk_limit: usize,
+
     #[structopt(short = "C", default_value("0"))]
     /// set the core thread of tokio core, default to core count
     pub core_threads: usize,
@@ -127,9 +131,19 @@ async fn actual(cli: Arc<Cli>) -> Result<()> {
 
     info!("Hello, world!");
     let mut v = FuturesUnordered::new();
+    let mut v_i = vec![];
+
     for d in std::fs::read_dir(&cli.path)? {
         let cc = cli.clone();
-        v.push(rt.spawn(eval_dir_entry(cc, d)));
+        v_i.push(d);
+        if v_i.len() >= cli.chunk_limit {
+            v.push(rt.spawn(eval_dir_entry(cc, v_i)));
+            v_i = vec![];
+        }
+    }
+    if v_i.len() > 0 {
+        let cc = cli.clone();
+        v.push(rt.spawn(eval_dir_entry(cc, v_i)));
     }
 
 
@@ -140,15 +154,13 @@ async fn actual(cli: Arc<Cli>) -> Result<()> {
     let mut size = 0u64;
     while let Some(x) = v.next().await {
         let goodr = x?;
-        match goodr {
-            None => (),
-            Some(j) => {
-                if count < cli.limit_detailed_output {
-                    info!("{:?}", j)
-                }
-                count += 1;
-                size += j.md.len();
+        debug!("chunk of {}", goodr.len());
+        for e in goodr {
+            if count < cli.limit_detailed_output {
+                info!("{:?}", e)
             }
+            count += 1;
+            size += e.md.len();
         }
     }
 
@@ -158,29 +170,33 @@ async fn actual(cli: Arc<Cli>) -> Result<()> {
     Ok(())
 }
 
-async fn eval_dir_entry(cli: Arc<Cli>, d: std::result::Result<DirEntry, std::io::Error>) -> Option<Job> {
+async fn eval_dir_entry(cli: Arc<Cli>, d: Vec<std::result::Result<DirEntry, std::io::Error>>) -> Vec<Job> {
     let mut size = 0u64;
-    match d {
-        Err(e) => error!("error getting d entry: {}", e),
-        Ok(d) => {
-            match d.metadata() {
-                Err(e) => error!("error getting metadata: for {} {}", d.path().display(), e),
-                Ok(md) => {
-                    size = md.len();
-                    match cli.path.join(d.path()).canonicalize() {
-                        Err(e) => error!("cannot canonicalize path: {} {}", d.path().display(), e),
-                        Ok(fullpath) => {
-                            let name = d.path();
-                            return Some(Job {
-                                path: name,
-                                md,
-                                full: fullpath,
-                            });
+    let mut v = vec![];
+    for d in d {
+        match d {
+            Err(e) => error!("error getting d entry: {}", e),
+            Ok(d) => {
+                match d.metadata() {
+                    Err(e) => error!("error getting metadata: for {} {}", d.path().display(), e),
+                    Ok(md) => {
+                        size = md.len();
+                        match cli.path.join(d.path()).canonicalize() {
+                            Err(e) => error!("cannot canonicalize path: {} {}", d.path().display(), e),
+                            Ok(fullpath) => {
+                                let name = d.path();
+                                v.push(Job {
+                                    path: name,
+                                    md,
+                                    full: fullpath,
+                                });
+                            }
                         }
                     }
                 }
             }
         }
+
     }
-    None
+    return v;
 }
