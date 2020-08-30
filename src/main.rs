@@ -249,6 +249,7 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>
 fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs, dst: &Vfs, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
 
     let start_dst_chk = Instant::now();
+
     let mut dst_path = PathBuf::from(dst_url.path());
     let mut tmp_path = PathBuf::from(dst_url.path());
     let name = path.file_name().unwrap().to_str().unwrap();
@@ -263,25 +264,31 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs,
             return Ok((0, 0));
         }
     }
-    let dst_chk_time = start_dst_chk.elapsed();
+    let start_open = Instant::now();
+    let dst_chk_time = start_open.duration_since(start_dst_chk);
 
     let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path).with_context(|| format!("opening src file direct: {}", path.display()))?);
     let mut f_out = BufWriter::with_capacity(copy_buffer_size,
                                              dst.create(&tmp_path).context("opening dst file direct")?);
+
     let time_xfer = Instant::now();
+    let open_time = time_xfer.duration_since(start_open);
+
     let size = std::io::copy(&mut f_in, &mut f_out)? as usize;
-    let xfer_time = time_xfer.elapsed();
 
     let start_rename = Instant::now();
+    let xfer_time = start_rename.duration_since(time_xfer);
+
     match dst.rename(&tmp_path, &dst_path) {
         Err(e) => error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {:?}", &tmp_path.display(), &dst_path.display(), e),
         Ok(()) => {
             let rename_time = start_rename.elapsed();
             let t = xfer_time.as_secs_f64();
             let r = (size as f64) / t;
-            info!("xferred: \"{}\" to {} \"{}\"  size: {}  rate: {:.3}MB/s chk_time: {:?} xfer_time: {:?} mv_time: {:?}",
+            let startlog = Instant::now();
+            info!("xferred: \"{}\" to {} \"{}\"  size: {}  rate: {:.3}MB/s chk_time: open time: {:?} {:?} xfer_time: {:?} mv_time: {:?}",
                   path.display(), &dst_url, &path.file_name().unwrap().to_string_lossy(),
-                  size, r / (1024f64 * 1024f64), dst_chk_time, xfer_time, rename_time);
+                  size, r / (1024f64 * 1024f64), dst_chk_time, open_time, xfer_time, rename_time);
             if let Err(e) = dst.set_perm(&dst_path) {
                 error!("could not set dst permissions for {} due to {}", dst_path.display(), e);
             }
