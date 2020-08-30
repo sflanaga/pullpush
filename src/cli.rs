@@ -178,6 +178,10 @@ pub struct Cli {
     #[structopt(short="L", long, parse(try_from_str = to_log_level), default_value("info"))]
     /// log level
     pub log_level: LevelFilter,
+
+    #[structopt(short="L", long, parse(try_from_str = to_duration), default_value("1s"))]
+    /// ticker interval
+    pub ticker_interval: Duration,
 }
 
 fn to_regex(s: &str) -> Result<Regex> {

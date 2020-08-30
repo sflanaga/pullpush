@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::thread::Builder;
+use std::thread::{Builder, sleep, spawn};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Context};
@@ -128,6 +128,9 @@ fn run() -> Result<()> {
 
     debug!("listing source");
     let now = SystemTime::now();
+
+    let tic_dur = cli.ticker_interval;
+    let h_tic = spawn(move || ticker(tic_dur));
 
     let h_lister_thread = {
         let (cli_c, tracker_c, send_c) = (cli.clone(), tracker.clone(), send.clone());
@@ -522,4 +525,22 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
 
     info!("lister thread returning after {:?} secs and listing {} files and local stat'ings of {}", start_f.elapsed(), count_files_listed, count_files_stat_ed);
     Ok(stats)
+}
+
+fn ticker(interval: Duration) {
+    let mut l_xfer = 0;
+    let mut l_path_ck = 0;
+    let mut l_st_ck = 0;
+    let mut l_nev = 0;
+    let mut l_yo = 0;
+    loop {
+        sleep(interval);
+        let xfer = STATS.xfer_count.fetch_add(0, Ordering::Relaxed) - l_xfer;
+        let path_ck = STATS.path_check.fetch_add(0, Ordering::Relaxed) - l_path_ck;
+        let st_ck = STATS.stat_check.fetch_add(0, Ordering::Relaxed) - l_st_ck;
+        let nev = STATS.never2xfer.fetch_add(0, Ordering::Relaxed) - l_nev;
+        let yo = STATS.too_young.fetch_add(0, Ordering::Relaxed) - l_yo;
+        let (l_xfer, l_path_ck, l_st_ck, l_nev, l_yo) = (xfer, path_ck, st_ck, nev, yo);
+        debug!("xfer: {}  paths: {}  stats: {}  never2xfer: {}  tooyoung: {}", xfer, path_ck, st_ck, nev, yo);
+    }
 }
