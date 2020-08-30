@@ -175,7 +175,7 @@ pub struct Cli {
     ///
     pub number_of_ssh_startups: usize,
 
-    #[structopt(short="v", long, parse(try_from_str = to_log_level), default_value("info"))]
+    #[structopt(short="L", long, parse(try_from_str = to_log_level), default_value("info"))]
     /// log level
     pub log_level: LevelFilter,
 }

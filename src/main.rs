@@ -135,7 +135,12 @@ fn run() -> Result<()> {
         Builder::new().name("lister".to_string()).spawn(move || lister_thread(&cli_c, src, &tracker_c, &send_c)).context("lister thread start failed")?
     };
     trace!("lister has started");
-    info!("lister completed listing: {} entries in {:.3} seconds", h_lister_thread.join().unwrap()?, now.elapsed()?.as_secs_f64());
+    let l_s = h_lister_thread.join().unwrap()?;
+
+    info!("paths list {} in {:?}  total {:?}", l_s.paths_listed, l_s.dir_list_time, l_s.total_time);
+    info!("paths filtered in {:?}  files stat'ed {} / {:?}", l_s.path_filter_time, l_s.paths_stat_ed, l_s.stat_filter_time);
+    info!("paths q'ed {} in {:?}", l_s.paths_queued, l_s.queue_after_time);
+    info!("write(s) all to tracker: {} in {:?}", l_s.add_all_to_tracker, l_s.add_all_to_tracker_time);
 
     let mut count = 0u64;
     let mut size = 0u64;
@@ -242,6 +247,8 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>
 }
 
 fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs, dst: &Vfs, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
+
+    let start_dst_chk = Instant::now();
     let mut dst_path = PathBuf::from(dst_url.path());
     let mut tmp_path = PathBuf::from(dst_url.path());
     let name = path.file_name().unwrap().to_str().unwrap();
@@ -249,7 +256,6 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs,
     dst_path.push(&name[..]);
     tmp_path.push(&tmpname[..]);
 
-    let timer = Instant::now();
     match dst.stat(&dst_path) {
         Err(_) => (), // silencing useless info... for now warn!("continue with error during stat of dest remote \"{}\", {}", &dst_path.display(), e),
         Ok(_) => {
@@ -257,29 +263,32 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs,
             return Ok((0, 0));
         }
     }
+    let dst_chk_time = start_dst_chk.elapsed();
 
-    // let size = if cli_c.threaded_copy {
-    //     let mut f_in = Arc::new(Mutex::new(src.open(&path).context("open src file - tcopy")?));
-    //     let mut f_out = Arc::new(Mutex::new(dst.create(&tmp_path).context("opening dst file - tcopy")?));
-    //     copier::copier(cli_c.threaded_copy_fill_buffer, &mut f_in, &mut f_out, cli_c.copy_buffer_size, cli_c.buffer_ring_size)?
-    // } else {
     let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path).with_context(|| format!("opening src file direct: {}", path.display()))?);
     let mut f_out = BufWriter::with_capacity(copy_buffer_size,
                                              dst.create(&tmp_path).context("opening dst file direct")?);
+    let time_xfer = Instant::now();
     let size = std::io::copy(&mut f_in, &mut f_out)? as usize;
-    // };
+    let xfer_time = time_xfer.elapsed();
 
+    let start_rename = Instant::now();
     match dst.rename(&tmp_path, &dst_path) {
         Err(e) => error!("Cannot rename remote tmp to final: \"{}\" to \"{}\" due to {:?}", &tmp_path.display(), &dst_path.display(), e),
         Ok(()) => {
-            let t = timer.elapsed().as_secs_f64();
+            let rename_time = start_rename.elapsed();
+            let t = xfer_time.as_secs_f64();
             let r = (size as f64) / t;
-            info!("xferred: \"{}\" to {} \"{}\" size: {}  rate: {:.3}MB/s  time: {:.3} secs", path.display(), &dst_url, &path.file_name().unwrap().to_string_lossy(),
-                  size, r / (1024f64 * 1024f64), t)
+            info!("xferred: \"{}\" to {} \"{}\"  size: {}  rate: {:.3}MB/s chk_time: {:?} xfer_time: {:?} mv_time: {:?}",
+                  path.display(), &dst_url, &path.file_name().unwrap().to_string_lossy(),
+                  size, r / (1024f64 * 1024f64), dst_chk_time, xfer_time, rename_time);
+            if let Err(e) = dst.set_perm(&dst_path) {
+                error!("could not set dst permissions for {} due to {}", dst_path.display(), e);
+            }
+
         }
     }
 
-    dst.set_perm(&dst_path)?;
 
     Ok((1, size as u64))
 }
@@ -352,17 +361,46 @@ fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus) -> Result
     }
 }
 
-fn lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<u64> {
+fn lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<ListResults> {
     match inner_lister_thread(cli, src, tracker, send) {
         Err(e) => {
             error!("lister thread failed: {:?}", e);
             return Err(e);
         }
-        Ok(c) => return Ok(c),
+        Ok(list_stats) => return Ok(list_stats),
     }
 }
 
-fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<u64> {
+struct ListResults {
+    pub paths_listed: u64,
+    pub dir_list_time: Duration,
+
+    pub path_filter_time: Duration,
+    pub stat_filter_time: Duration,
+    pub queue_after_time: Duration,
+    pub add_all_to_tracker_time: Duration,
+
+    pub paths_stat_ed: u64,
+    pub paths_queued: u64,
+    pub add_all_to_tracker: u64,
+    pub total_time: Duration,
+}
+
+fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<ListResults> {
+
+    let mut stats = ListResults{
+        dir_list_time: Default::default(),
+        paths_listed: 0,
+        path_filter_time: Default::default(),
+        paths_stat_ed: 0,
+        stat_filter_time: Default::default(),
+        queue_after_time: Default::default(),
+        add_all_to_tracker_time: Default::default(),
+        total_time: Default::default(),
+        paths_queued: 0,
+        add_all_to_tracker: 0
+    };
+
     let start_f = Instant::now();
     let mut count_files_listed = 0u64;
     let mut count_files_stat_ed = 0u64;
@@ -371,12 +409,17 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
     let mut dir = src.open_dir(&dir_path).with_context(|| format!("open dir on base directory: {}", dir_path.display()))?;
 
     let mut list = &dir.read_all_dir_entry().context("error on next_dir_entry")?;
+    stats.dir_list_time = start_f.elapsed();
+    stats.paths_listed = list.len() as u64;
+
     info!("file list {} in {:?}", list.len(), start_f.elapsed());
 
     let mut xfer_list = vec![];
     let mut with_stat_list = vec![];
 
     let has_stat = list.len() > 0 && list[0].1.is_some();
+
+    let start_path_filter = Instant::now();
 
     let mut list = if !has_stat {
         let start_f = Instant::now();
@@ -400,6 +443,10 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
         list.iter().map(|(p,o)| (dir_path.join(p).clone(), o.unwrap().clone())).collect::<Vec<_>>()
     };
 
+    stats.path_filter_time = start_path_filter.elapsed();
+
+    let start_stat_filter = Instant::now();
+    stats.paths_stat_ed = list.len() as u64;
     for (path, filestatus) in list.iter() {
         let k_s = keep_status(&cli, &path, *filestatus)?;
         count_files_stat_ed += 1;
@@ -418,12 +465,16 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
                     send.send(Some((path.clone(), *filestatus)))?;
                 } else {
                     xfer_list.push((path.clone(), filestatus.clone()));
+                    stats.paths_queued += 1;
                 }
             } else {
                 trace!("would have xferred file: {}", path.display());
             }
         }
     }
+    stats.stat_filter_time = start_path_filter.elapsed();
+
+    let start_queue_time = Instant::now();
     if !cli.queue_as_found {
         trace!("queueing all files for xfer at once");
         let start_f = Instant::now();
@@ -433,25 +484,35 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
                 None => break,
                 Some(x) => {
                     trace!("queueing file: {}", x.0.display());
+                    stats.paths_queued += 1;
                     send.send(Some(x))?
                 }
             }
         }
         info!("vec to queue {} in: {:?}", count, start_f.elapsed());
     }
+    stats.queue_after_time = start_queue_time.elapsed();
+
+    let start_add_all_to_filter = Instant::now();
     if cli.add_all_to_tracker {
         trace!("write just paths to track for later speeder listings");
-        let count = with_stat_list.len();
+        stats.add_all_to_tracker = with_stat_list.len() as u64;
         let start_f = Instant::now();
         loop {
             match with_stat_list.pop() {
                 None => break,
-                Some(x) => tracker.write().unwrap().insert_path_and_status(&x.0, *x.1)?,
+                Some(x) => {
+                    tracker.write().unwrap().insert_path_and_status(&x.0, *x.1)?
+                },
             }
         }
-        info!("vec of ignorable in future files {} to tracker in {:?}", count, start_f.elapsed());
+        info!("vec of ignorable in future files {} to tracker in {:?}", stats.add_all_to_tracker, start_f.elapsed());
     }
 
+    stats.add_all_to_tracker_time = start_add_all_to_filter.elapsed();
+
+    stats.total_time = start_f.elapsed();
+
     info!("lister thread returning after {:?} secs and listing {} files and local stat'ings of {}", start_f.elapsed(), count_files_listed, count_files_stat_ed);
-    Ok(count_files_listed)
+    Ok(stats)
 }
