@@ -46,6 +46,7 @@ mod util;
 pub struct Stats {
     pub first_xfer_time: Mutex<Option<Instant>>,
     pub xfer_count: AtomicUsize,
+    pub dirs_check: AtomicUsize,
     pub path_check: AtomicUsize,
     pub stat_check: AtomicUsize,
     pub never2xfer: AtomicUsize,
@@ -56,6 +57,7 @@ lazy_static! {
     pub static ref STATS: Stats = Stats {
         first_xfer_time: Mutex::new(None),
         xfer_count: AtomicUsize::new(0),
+        dirs_check: AtomicUsize::new(0),
         path_check: AtomicUsize::new(0),
         stat_check: AtomicUsize::new(0),
         never2xfer: AtomicUsize::new(0),
@@ -529,6 +531,7 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
 
 fn ticker(interval: Duration) {
     let mut l_xfer = 0;
+    let mut l_dirs = 0;
     let mut l_path_ck = 0;
     let mut l_st_ck = 0;
     let mut l_nev = 0;
@@ -536,11 +539,12 @@ fn ticker(interval: Duration) {
     loop {
         sleep(interval);
         let xfer = STATS.xfer_count.fetch_add(0, Ordering::Relaxed) - l_xfer;
+        let dirs = STATS.dirs_check.fetch_add(0, Ordering::Relaxed) - l_dirs;
         let path_ck = STATS.path_check.fetch_add(0, Ordering::Relaxed) - l_path_ck;
         let st_ck = STATS.stat_check.fetch_add(0, Ordering::Relaxed) - l_st_ck;
         let nev = STATS.never2xfer.fetch_add(0, Ordering::Relaxed) - l_nev;
         let yo = STATS.too_young.fetch_add(0, Ordering::Relaxed) - l_yo;
-        let (l_xfer, l_path_ck, l_st_ck, l_nev, l_yo) = (xfer, path_ck, st_ck, nev, yo);
-        debug!("xfer: {}  paths: {}  stats: {}  never2xfer: {}  tooyoung: {}", xfer, path_ck, st_ck, nev, yo);
+        let (l_xfer, l_dirs, l_path_ck, l_st_ck, l_nev, l_yo) = (xfer, dirs, path_ck, st_ck, nev, yo);
+        debug!("xfer: {}  dir_entry: {}  paths: {}  stats: {}  never2xfer: {}  tooyoung: {}", xfer, dirs, path_ck, st_ck, nev, yo);
     }
 }

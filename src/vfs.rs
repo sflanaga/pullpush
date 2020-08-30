@@ -16,6 +16,7 @@ use crate::vfs::FileType::{Regular, Directory};
 use std::convert::TryFrom;
 use std::ops::Add;
 use std::fmt::Display;
+use std::sync::atomic::Ordering;
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 
@@ -79,6 +80,7 @@ impl ReadDirHandle {
 
                             let status = FileStatus::try_from(&stat).context("next_dir_entry of SftpFile canon")?;
                             trace!("next_dir_entry sftp return: {}", filename.display());
+                            crate::STATS.dirs_check.fetch_add(1, Ordering::Relaxed);
                             list.push( (filename, Some(status)) );
                         }
                         Err(ref e) if e.code() == LIBSSH2_ERROR_FILE => return Ok(list),
@@ -95,6 +97,7 @@ impl ReadDirHandle {
                         Some(r) => match r {
                             Err(e) => return Err(ERR!("error on reading next entry in ReadDir: {}", e)),
                             Ok(de) => {
+                                crate::STATS.dirs_check.fetch_add(1, Ordering::Relaxed);
                                 list.push((de.path(), None));
                             },
                         }
