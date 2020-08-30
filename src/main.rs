@@ -286,7 +286,7 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs,
             let t = xfer_time.as_secs_f64();
             let r = (size as f64) / t;
             let startlog = Instant::now();
-            info!("xferred: \"{}\" to {} \"{}\"  size: {}  rate: {:.3}MB/s chk_time: open time: {:?} {:?} xfer_time: {:?} mv_time: {:?}",
+            info!("xferred: \"{}\" to {} \"{}\"  size: {}  rate: {:.3}MB/s  chk_time: {:?} open time: {:?} xfer_time: {:?} mv_time: {:?}",
                   path.display(), &dst_url, &path.file_name().unwrap().to_string_lossy(),
                   size, r / (1024f64 * 1024f64), dst_chk_time, open_time, xfer_time, rename_time);
             if let Err(e) = dst.set_perm(&dst_path) {
