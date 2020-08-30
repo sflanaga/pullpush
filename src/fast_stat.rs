@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use crate::vfs::FileStatus;
 use std::thread::spawn;
 use std::convert::TryFrom;
+use std::sync::atomic::Ordering;
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 
@@ -25,6 +26,7 @@ fn __get_stats(recv: &Receiver<Option<PathBuf>>, list: &mut Arc<Mutex<Option<Vec
             Err(e) => return Err(anyhow!("cannot recv in stats thread {}", e)),
             Ok(None) => break,
             Ok(Some(path)) => {
+                crate::STATS.stat_check.fetch_add(1, Ordering::Relaxed);
                 let md = std::fs::metadata(&path)?;
                 let fs = FileStatus::try_from(&md)?;
                 match list.lock() {
