@@ -141,27 +141,15 @@ fn main() -> Result<()> {
 
 
 async fn actual(cli: Arc<Cli>) -> Result<()> {
-
-
     info!("Hello, world!");
     let mut v = FuturesUnordered::new();
-    let mut v_i = vec![];
 
     let mut dir = tokio::fs::read_dir(&cli.path).await?;
 
     while let Some(x) = dir.next_entry().await? {
         let cc = cli.clone();
-        v_i.push(x);
-        if v_i.len() >= cli.chunk_limit {
-            v.push(tokio::spawn(eval_dir_entry(cc, v_i)));
-            v_i = vec![];
-        }
+        v.push(tokio::spawn(eval_dir_entry(cc, x)));
     }
-    if v_i.len() > 0 {
-        let cc = cli.clone();
-        v.push(tokio::spawn(eval_dir_entry(cc, v_i)));
-    }
-
 
     info!("setup done");
 
@@ -170,8 +158,7 @@ async fn actual(cli: Arc<Cli>) -> Result<()> {
     let mut size = 0u64;
     while let Some(x) = v.next().await {
         let goodr = x?;
-        debug!("chunk of {}", goodr.len());
-        for e in goodr {
+        if let Some(e) = goodr {
             if count < cli.limit_detailed_output {
                 info!("{:?}", e)
             }
@@ -186,28 +173,24 @@ async fn actual(cli: Arc<Cli>) -> Result<()> {
     Ok(())
 }
 
-async fn eval_dir_entry(cli: Arc<Cli>, d: Vec<DirEntry>) -> Vec<Job> {
+async fn eval_dir_entry(cli: Arc<Cli>, d: DirEntry) -> Option<Job> {
     let mut size = 0u64;
-    let mut v = vec![];
-    for d in d {
-        match d.metadata().await {
-            Err(e) => error!("error getting metadata: for {} {}", d.path().display(), e),
-            Ok(md) => {
-                size = md.len();
-                match canonicalize(cli.path.join(d.path())).await {
-                    Err(e) => error!("cannot canonicalize path: {} {}", d.path().display(), e),
-                    Ok(fullpath) => {
-                        let name = d.path();
-                        v.push(Job {
-                            path: name,
-                            md,
-                            full: fullpath,
-                        });
-                    }
+    match d.metadata().await {
+        Err(e) => error!("error getting metadata: for {} {}", d.path().display(), e),
+        Ok(md) => {
+            size = md.len();
+            match canonicalize(cli.path.join(d.path())).await {
+                Err(e) => error!("cannot canonicalize path: {} {}", d.path().display(), e),
+                Ok(fullpath) => {
+                    let name = d.path();
+                    return Some(Job {
+                        path: name,
+                        md,
+                        full: fullpath,
+                    });
                 }
-            },
+            }
         }
     }
-    return v;
-
+    return None;
 }
