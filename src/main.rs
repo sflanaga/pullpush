@@ -4,7 +4,7 @@
 #![allow(unused_mut)]
 #![allow(unreachable_code)]
 
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Read};
 use std::io::Write;
 use std::net::TcpStream;
 use std::ops::{Add, Sub};
@@ -240,7 +240,7 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>
                     }
                     rec_1st_xfer_time = true;
                 }
-                let (c, s) = xfer_file(&cli, &path, &filestat, &src, &dst, &cli.dst_url, cli.copy_buffer_size)?;
+                let (c, s) = xfer_file(&cli, &path, &filestat, &src, &dst)?;
                 STATS.xfer_count.fetch_add(1, Ordering::Relaxed);
                 size += s;
                 count += c;
@@ -251,12 +251,12 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>
     // Ok((count, size))
 }
 
-fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs, dst: &Vfs, dst_url: &Url, copy_buffer_size: usize) -> Result<(u64, u64)> {
+fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs, dst: &Vfs) -> Result<(u64, u64)> {
 
     let start_dst_chk = Instant::now();
 
-    let mut dst_path = PathBuf::from(dst_url.path());
-    let mut tmp_path = PathBuf::from(dst_url.path());
+    let mut dst_path = PathBuf::from(cli_c.dst_url.path());
+    let mut tmp_path = PathBuf::from(cli_c.dst_url.path());
     let name = path.file_name().unwrap().to_str().unwrap();
     let tmpname = format!(".tmp{}", name);
     dst_path.push(&name[..]);
@@ -265,21 +265,31 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs,
     match dst.stat(&dst_path) {
         Err(_) => (), // silencing useless info... for now warn!("continue with error during stat of dest remote \"{}\", {}", &dst_path.display(), e),
         Ok(_) => {
-            warn!("file: \"{}\" already at {} and recording it as xferred - no overwrite option yet", &path.file_name().unwrap().to_string_lossy(), &dst_url);
+            warn!("file: \"{}\" already at {} and recording it as xferred - no overwrite option yet", &path.file_name().unwrap().to_string_lossy(), &cli_c.dst_url);
             return Ok((0, 0));
         }
     }
     let start_open = Instant::now();
     let dst_chk_time = start_open.duration_since(start_dst_chk);
 
-    let mut f_in = BufReader::with_capacity(copy_buffer_size, src.open(&path).with_context(|| format!("opening src file direct: {}", path.display()))?);
-    let mut f_out = BufWriter::with_capacity(copy_buffer_size,
-                                             dst.create(&tmp_path).context("opening dst file direct")?);
 
-    let time_xfer = Instant::now();
-    let open_time = time_xfer.duration_since(start_open);
+    let (time_xfer, open_time, size) = if !cli_c.threaded_copy {
+        let mut f_in = BufReader::with_capacity(cli_c.copy_buffer_size, src.open(&path).with_context(|| format!("opening src file direct: {}", path.display()))?);
+        let mut f_out = BufWriter::with_capacity(cli_c.copy_buffer_size,
+                                                 dst.create(&tmp_path).context("opening dst file direct")?);
+        let time_xfer = Instant::now();
+        let open_time = time_xfer.duration_since(start_open);
 
-    let size = std::io::copy(&mut f_in, &mut f_out)? as usize;
+        (time_xfer, open_time, std::io::copy(&mut f_in, &mut f_out)? as usize)
+    } else {
+        let mut f_in = Arc::new(Mutex::new(src.open(&path).with_context(|| format!("opening src file direct: {}", path.display()))?));// as Arc<Mutex<Box<dyn Read + Send>>>;
+        let mut f_out =Arc::new(Mutex::new(dst.create(&tmp_path).context("opening dst file direct")?));// as Arc<Mutex<Box<dyn Write + Send>>>;
+
+        let time_xfer = Instant::now();
+        let open_time = time_xfer.duration_since(start_open);
+
+        (time_xfer, open_time, copier::copier(&mut f_in, &mut f_out, cli_c.copy_buffer_size, cli_c.buffer_ring_size)?)
+    };
 
     let start_rename = Instant::now();
     let xfer_time = start_rename.duration_since(time_xfer);
@@ -292,7 +302,7 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs,
             let r = (size as f64) / t;
             let startlog = Instant::now();
             info!("xferred: \"{}\" to {} \"{}\"  size: {}  rate: {:.3}MB/s  chk_time: {:?} open time: {:?} xfer_time: {:?} mv_time: {:?}",
-                  path.display(), &dst_url, &path.file_name().unwrap().to_string_lossy(),
+                  path.display(), &cli_c.dst_url, &path.file_name().unwrap().to_string_lossy(),
                   size, r / (1024f64 * 1024f64), dst_chk_time, open_time, xfer_time, rename_time);
             if let Err(e) = dst.set_perm(&dst_path) {
                 error!("could not set dst permissions for {} due to {}", dst_path.display(), e);

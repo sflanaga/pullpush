@@ -168,13 +168,13 @@ impl Vfs {
         }
 
     }
-    pub fn open(&self, filename: &Path) -> Result<Box<dyn Read>> {
+    pub fn open(&self, filename: &Path) -> Result<Box<dyn Read + Send>> {
         match self {
             Vfs::Sftp(f) => Ok(Box::new(f.sftp.open(filename)?)),
             Vfs::Local(f) => Ok(Box::new(std::fs::File::open(&filename)?)),
         }
     }
-    pub fn create(&self, filename: &Path) -> Result<Box<dyn Write>> {
+    pub fn create(&self, filename: &Path) -> Result<Box<dyn Write + Send>> {
         match self {
             Vfs::Sftp(f) => Ok(Box::new(f.sftp.create(filename)?)),
             Vfs::Local(f) => Ok(Box::new(std::fs::File::create(&filename)?)),
