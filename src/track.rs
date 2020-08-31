@@ -3,7 +3,6 @@
 // #![allow(unused_variables)]
 //
 use std::path::{PathBuf};
-use std::collections::{BTreeSet, HashSet};
 use ssh2::FileStat;
 use anyhow::{Context, anyhow};
 use std::io::{BufWriter, BufRead, Write};
@@ -11,11 +10,12 @@ use std::fs::{File, remove_file};
 use std::time::{SystemTime, Duration, Instant};
 use log::{info, debug, warn, error, trace};
 use std::cmp::Ordering;
-use std::ops::Add;
-
+use std::ops::{Add, Sub};
 use crate::vfs::{FileStatus};
 use std::hash::Hasher;
 
+//use hashbrown::HashSet - only add 5% so not using it
+use std::collections::HashSet;
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 
@@ -26,9 +26,15 @@ struct Track {
     size: u64,
 }
 
+fn print_type_of<T>(_: &T) {
+    println!("{}", std::any::type_name::<T>())
+}
+
 impl std::hash::Hash for Track {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.src_path.hash(state);
+        //self.src_path.hash(state) - optimization but relies on path string being normalized
+        // 22% increase in read tracker perf
+        self.src_path.as_os_str().to_string_lossy().hash(state)
     }
 }
 
@@ -59,16 +65,37 @@ fn SystemTime_to_u64(mtime: SystemTime) -> u64 {
     dur.as_secs()
 }
 
+fn to_err<T>(opt: Option<T>, msg: &'static str) -> Result<T> {
+    match opt {
+        None => Err(anyhow!(msg)),
+        Some(t) => Ok(t)
+    }
+}
+
 impl Track {
     pub fn from_str(s: &str) -> Result<Self> {
-        let v = s.split('\0').collect::<Vec<_>>();
-        if v.len() != 3 { Err(anyhow!("Missing fields in line \"{}\"", s))? }
+        let mut v = s.split('\0');
         Ok(Track {
-            src_path: PathBuf::from(v[0]),
-            lastmod: v[1].parse().with_context(|| format!("last mod time number cannot be parsed in \"{}\"", s))?,
-            size: v[2].parse().with_context(|| format!("file size number cannot be parsed in \"{}\"", s))?,
+            src_path: PathBuf::from(
+                to_err(v.next(), "missing first field in track record")?
+            ),
+            lastmod: to_err(v.next(), "missing 2nd field in track record")?
+                .parse()
+                .with_context(|| format!("last mod time number cannot be parsed in \"{}\"", s))?,
+            size: to_err(v.next(), "missing 3rd field in track record")?
+                .parse()
+                .with_context(|| format!("file size number cannot be parsed in \"{}\"", s))?,
         })
     }
+    /*
+    from_str.... opt notes:
+
+    I tried smallvec, lexical::parse, csv parsing
+
+    The main things that helped was using faster hasher, and not collecting the result of
+    of the split above
+    */
+
     pub fn from_sftp_entry(path: &PathBuf, filestat: FileStatus) -> Result<Self> {
         Ok(Track {
             src_path: path.clone(),
@@ -108,29 +135,38 @@ pub enum TrackDelta {
 
 impl Tracker {
     pub fn new(file: &PathBuf, max_track_age: Duration) -> Result<Self> {
-        let mut set = HashSet::new();
+        let mut set = HashSet::default();
         Tracker::entries_from(&file, &mut set, max_track_age)?;
 
-        let mut filename = file.file_name().unwrap().to_owned();
-        filename.push(".wal");
-        let logpath = file.with_file_name(filename);
+        let mut wal_filename = file.file_name().unwrap().to_owned();
+        wal_filename.push(".wal");
+        let wal_path = file.with_file_name(wal_filename);
 
         // recover wal file
-        if logpath.exists() {
-            Tracker::entries_from(&logpath, &mut set, max_track_age)?;
-            warn!("existing wal file: {}, read - so writing new tracker file to prevent further issues", &logpath.display());
-            Tracker::write_entries(file, &set)?;
-            remove_file(&logpath)?;
-            info!("removed existing wal file");
+        if wal_path.exists() {
+            if std::fs::metadata(&wal_path)?.len() == 0 {
+                warn!("wal file there but empty, so ignoring \"{}\"", &wal_path.display());
+            } else {
+                Tracker::entries_from(&wal_path, &mut set, max_track_age)?;
+                warn!("existing wal file: {}, read - so writing new tracker file to prevent further issues", &wal_path.display());
+                Tracker::write_entries(file, &set)?;
+                remove_file(&wal_path)?;
+                info!("removed existing wal file");
+            }
         }
-        let wal = BufWriter::new(std::fs::File::create(&logpath)
-            .with_context(|| format!("Unable to create WAL log file\"{}\"", &logpath.display()))?);
+
+        let wal = BufWriter::new(std::fs::File::create(&wal_path)
+            .with_context(|| format!("Unable to create WAL log file\"{}\"", &wal_path.display()))?);
 
         Ok(Tracker {
             file: file.clone(),
             wal: Some(wal),
             set,
         })
+    }
+
+    pub fn num_entries(&self) -> usize {
+        self.set.len()
     }
 
     pub fn commit(&mut self) -> Result<()> {
@@ -175,34 +211,45 @@ impl Tracker {
             }
             Ok(f) => f,
         };
+        let fs = std::fs::metadata(path)?.len();
+
+        let mtime_too_old = {
+            // compute mtime cutoff point so we do not repeat that computation
+            // in inner loop
+            let now = SystemTime::now();
+            let then = now.sub(max_track_age);
+            SystemTime_to_u64(then)
+        };
+
         let lines = std::io::BufReader::new(f_h).lines();
         let mut count = 0;
         for l in lines {
-            count += 1;
             let l = l.with_context(|| format!("unable parse data file:{}:{}", &path.display(), count))?;
             match Track::from_str(&l) {
                 Err(e) => error!("skipping a line due to {}", e),
                 Ok(t) => {
-                    let ft = SystemTime::UNIX_EPOCH.add(Duration::from_secs(t.lastmod));
-                    let age = now.duration_since(ft).with_context(|| format!("mtime calc: mtime: {}, now: {:?} ft: {:?}", t.lastmod, now, ft))?;
-                    if age < max_track_age {
-                        trace!("file \"{}\" tracking age: {:?}", t.src_path.display(), age);
+                    if t.lastmod > mtime_too_old {
+                        trace!("file \"{}\" tracking age: {:?}", t.src_path.display(), u64_to_SystemTime(t.lastmod));
                         set.insert(t);
+                        count += 1;
                     } else {
-                        trace!("file \"{}\" too old at {:?}", t.src_path.display(), age);
+                        trace!("file \"{}\" too old at {:?}", t.src_path.display(), u64_to_SystemTime(t.lastmod));
                     }
                     ()
                 }
             }
         }
-
+        if fs > 0 && count == 0 {
+            return Err(anyhow!("Fishy tracker file: {}. It has size but no records could be parsed from it.", path.display()));
+        }
         info!("read {} entries from \"{}\" in {:?}", count, &path.display(), now.elapsed().unwrap_or(Duration::from_secs(0)));
         Ok(())
     }
 
+
     pub fn path_exists_in_tracker(&self, path: &PathBuf) -> bool {
         let track = Track::from_just_path(&path);
-        return self.set.contains(&track)
+        return self.set.contains(&track);
     }
 
     pub fn check(&mut self, path: &PathBuf, filestat: FileStatus) -> Result<TrackDelta> {
