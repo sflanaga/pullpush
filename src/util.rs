@@ -1,9 +1,13 @@
 use std::io::Write;
 
 use chrono::Utc;
-use env_logger::{Builder, Env, fmt::{Color, Formatter}};
-use log::{Level, LevelFilter};
-use log::Record;
+use env_logger; //::{Builder, Env, fmt::{Color, Formatter}};
+use log::LevelFilter;
+
+#[allow(unused)]
+pub fn print_type_of<T>(_: &T) {
+    println!("{}", std::any::type_name::<T>())
+}
 
 pub fn init_log(level: LevelFilter) {
     let mut builder = env_logger::Builder::new();

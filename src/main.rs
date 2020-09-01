@@ -1,36 +1,26 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(unused_mut)]
-#![allow(unreachable_code)]
+// #![allow(dead_code)]
+// #![allow(unused_imports)]
+// #![allow(unused_variables)]
+// #![allow(unused_mut)]
+// #![allow(unreachable_code)]
 
-use std::io::{BufReader, BufWriter, Read};
-use std::io::Write;
-use std::net::TcpStream;
-use std::ops::{Add, Sub};
-use std::path::{Path, PathBuf};
+use std::io::{BufReader, BufWriter};
+use std::path::{PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
 use std::thread::{Builder, sleep, spawn};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Context};
-use chrono::Utc;
 use crossbeam_channel::{Receiver, Sender};
-use env_logger::Env;
-use env_logger::fmt::Color;
 use lazy_static::lazy_static;
-use libssh2_sys::LIBSSH2_ERROR_FILE;
-use log::{debug, error, info, Record, trace, warn};
-use log::Level;
-use ssh2::{FileStat, OpenFlags, OpenType, Session, Sftp};
+use log::{debug, error, info, trace, warn};
 use structopt::StructOpt;
 use url::Url;
 
 use sema::Semaphore;
-use track::{TrackDelta, Tracker};
-use vfs::{FileStatus, ReadDirHandle, Vfs};
+use track::Tracker;
+use vfs::{FileStatus, Vfs};
 
 use crate::cli::Cli;
 
@@ -90,27 +80,16 @@ fn run() -> Result<()> {
         cli
     });
 
-    let mut builder = env_logger::Builder::new();
-
-    builder.format(|buf, record: &Record| {
-        writeln!(buf, "{} [{:4}] [{}:{}] {:>5}: {} ", Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-                 thread::current().name().or(Some("unknown")).unwrap(),
-                 record.file().unwrap(),
-                 record.line().unwrap(),
-                 record.level(),
-                 record.args())
-    });
-    builder.filter_level(cli.log_level);
-    builder.init();
+    util::init_log(cli.log_level);
 
     for _ in 0..cli.number_of_ssh_startups {
         SSH_SEMA.release();
     }
 
-    let mut src = vfs::Vfs::new(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?;
+    let src = vfs::Vfs::new(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?;
     // we do not use this dst but it is done to make sure the downstream can connect before too much machinery
     // get going.  Might be removed later.
-    let mut dst = vfs::Vfs::new(&cli.dst_url, cli.dst_perm, &cli.dst_pk, Some(cli.timeout))?;
+    let _dst = vfs::Vfs::new(&cli.dst_url, cli.dst_perm, &cli.dst_pk, Some(cli.timeout))?;
 
     let tracker = Arc::new(RwLock::new(Tracker::new(&cli.track, cli.max_track_age)?));
 
@@ -129,10 +108,9 @@ fn run() -> Result<()> {
     let start = Instant::now();
 
     debug!("listing source");
-    let now = SystemTime::now();
 
     let tic_dur = cli.ticker_interval;
-    let h_tic = spawn(move || ticker(tic_dur));
+    let _h_tic = spawn(move || ticker(tic_dur));
 
     let h_lister_thread = {
         let (cli_c, tracker_c, send_c) = (cli.clone(), tracker.clone(), send.clone());
@@ -189,24 +167,6 @@ fn check_url(url: &Url) -> Result<()> {
     }
 }
 
-fn create_sftp(url: &Url, pk: &PathBuf, timeout: Duration) -> Result<(Session, Sftp)> {
-    let soc = url.socket_addrs(|| Some(22))?[0];
-    let tcp = TcpStream::connect_timeout(&soc, timeout).with_context(|| format!("Tcp connection to url: {} failed", &url))?;
-
-
-    let mut sess = Session::new().unwrap();
-    sess.set_tcp_stream(tcp);
-    sess.handshake()?;
-    sess.userauth_pubkey_file(&url.username(), None,
-                              &pk, None).with_context(|| format!("Unable to setup user with private key: {} for url {}", pk.display(), &url))?;
-
-    let sftp = sess.sftp().with_context(|| format!("Unable to create sftp session with private key: {} for url {}", pk.display(), &url))?;
-    sftp.lstat(&*PathBuf::from(&url.path().to_string())).with_context(|| format!("Cannot stat check remote path of \"{}\"", url))?;
-
-
-    Ok((sess, sftp))
-}
-
 fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli_c: &Arc<Cli>, tracker: &mut Arc<RwLock<Tracker>>) -> (u64, u64) {
     match xferring_inn(recv_c, cli_c, tracker) {
         Err(e) => {
@@ -219,7 +179,7 @@ fn xferring(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli_c: &Arc<Cli>, 
 
 fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>, tracker: &mut Arc<RwLock<Tracker>>) -> Result<(u64, u64)> {
     let (src,dst) = {
-        let l = SSH_SEMA.access();
+        let _l = SSH_SEMA.access();
         (vfs::Vfs::new(&cli.src_url, cli.dst_perm, &cli.src_pk, Some(cli.timeout))?, vfs::Vfs::new(&cli.dst_url, cli.dst_perm, &cli.dst_pk, Some(cli.timeout))?)
     };
 
@@ -240,7 +200,7 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>
                     }
                     rec_1st_xfer_time = true;
                 }
-                let (c, s) = xfer_file(&cli, &path, &filestat, &src, &dst)?;
+                let (c, s) = xfer_file(&cli, &path, &src, &dst)?;
                 STATS.xfer_count.fetch_add(1, Ordering::Relaxed);
                 size += s;
                 count += c;
@@ -251,7 +211,7 @@ fn xferring_inn(recv_c: &Receiver<Option<(PathBuf, FileStatus)>>, cli: &Arc<Cli>
     // Ok((count, size))
 }
 
-fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs, dst: &Vfs) -> Result<(u64, u64)> {
+fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, src: &Vfs, dst: &Vfs) -> Result<(u64, u64)> {
 
     let start_dst_chk = Instant::now();
 
@@ -300,7 +260,6 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, filestat: &FileStatus, src: &Vfs,
             let rename_time = start_rename.elapsed();
             let t = xfer_time.as_secs_f64();
             let r = (size as f64) / t;
-            let startlog = Instant::now();
             info!("xferred: \"{}\" to {} \"{}\"  size: {}  rate: {:.3}MB/s  chk_time: {:?} open time: {:?} xfer_time: {:?} mv_time: {:?}",
                   path.display(), &cli_c.dst_url, &path.file_name().unwrap().to_string_lossy(),
                   size, r / (1024f64 * 1024f64), dst_chk_time, open_time, xfer_time, rename_time);
@@ -383,7 +342,7 @@ fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus) -> Result
     }
 }
 
-fn lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<ListResults> {
+fn lister_thread(cli: &Arc<Cli>, src: Vfs, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<ListResults> {
     match inner_lister_thread(cli, src, tracker, send) {
         Err(e) => {
             error!("lister thread failed: {:?}", e);
@@ -424,13 +383,11 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
     };
 
     let start_f = Instant::now();
-    let mut count_files_listed = 0u64;
-    let mut count_files_stat_ed = 0u64;
     let dir_path = &PathBuf::from(cli.src_url.path());
     trace!("opening dir: {}", dir_path.display());
     let mut dir = src.open_dir(&dir_path).with_context(|| format!("open dir on base directory: {}", dir_path.display()))?;
 
-    let mut list = &dir.read_all_dir_entry().context("error on next_dir_entry")?;
+    let list = &dir.read_all_dir_entry().context("error on next_dir_entry")?;
     stats.dir_list_time = start_f.elapsed();
     stats.paths_listed = list.len() as u64;
 
@@ -443,11 +400,11 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
 
     let start_path_filter = Instant::now();
 
-    let mut list = if !has_stat {
+    let list = if !has_stat {
         let start_f = Instant::now();
         let mut path_checked_list = list.iter()
             .map(|(p, o)| (dir_path.join(&p), o))
-            .filter(|(p, o)| {
+            .filter(|(p, _o)| {
                 match keep_path(&cli, p, &tracker) {
                     Err(e) => {
                         error!("Unable to check path {} due to {}", p.display(), e);
@@ -455,7 +412,7 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
                     }
                     Ok(keep) => keep,
                 }
-            }).map(|(p, o)| p).collect::<Vec<_>>();
+            }).map(|(p, _o)| p).collect::<Vec<_>>();
         info!("path based checks of {} in {:?}", list.len(), start_f.elapsed());
         let start_f = Instant::now();
         let x = fast_stat::get_stats_fast(cli.local_file_stat_thread_pool_size, &mut path_checked_list).context("get fast stats failure")?;
@@ -468,10 +425,9 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
     stats.path_filter_time = start_path_filter.elapsed();
 
     let start_stat_filter = Instant::now();
-    stats.paths_stat_ed = list.len() as u64;
     for (path, filestatus) in list.iter() {
         let k_s = keep_status(&cli, &path, *filestatus)?;
-        count_files_stat_ed += 1;
+        stats.paths_stat_ed +=1;
         if k_s & FILE_NOT_A_FILE != 0 || k_s & FILE_TOO_OLD != 0 {
             // these file should never be transferred in the future
             STATS.never2xfer.fetch_add(1, Ordering::Relaxed);
@@ -494,7 +450,7 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
             }
         }
     }
-    stats.stat_filter_time = start_path_filter.elapsed();
+    stats.stat_filter_time = start_stat_filter.elapsed();
 
     let start_queue_time = Instant::now();
     if !cli.queue_as_found {
@@ -535,26 +491,19 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
 
     stats.total_time = start_f.elapsed();
 
-    info!("lister thread returning after {:?} secs and listing {} files and local stat'ings of {}", start_f.elapsed(), count_files_listed, count_files_stat_ed);
+    info!("lister thread returning after {:?} secs and listing {} files and local stat'ings of {}", start_f.elapsed(), stats.paths_listed, stats.paths_stat_ed);
     Ok(stats)
 }
 
 fn ticker(interval: Duration) {
-    let mut l_xfer = 0;
-    let mut l_dirs = 0;
-    let mut l_path_ck = 0;
-    let mut l_st_ck = 0;
-    let mut l_nev = 0;
-    let mut l_yo = 0;
     loop {
         sleep(interval);
-        let xfer = STATS.xfer_count.fetch_add(0, Ordering::Relaxed) - l_xfer;
-        let dirs = STATS.dirs_check.fetch_add(0, Ordering::Relaxed) - l_dirs;
-        let path_ck = STATS.path_check.fetch_add(0, Ordering::Relaxed) - l_path_ck;
-        let st_ck = STATS.stat_check.fetch_add(0, Ordering::Relaxed) - l_st_ck;
-        let nev = STATS.never2xfer.fetch_add(0, Ordering::Relaxed) - l_nev;
-        let yo = STATS.too_young.fetch_add(0, Ordering::Relaxed) - l_yo;
-        let (l_xfer, l_dirs, l_path_ck, l_st_ck, l_nev, l_yo) = (xfer, dirs, path_ck, st_ck, nev, yo);
+        let xfer = STATS.xfer_count.fetch_add(0, Ordering::Relaxed);
+        let dirs = STATS.dirs_check.fetch_add(0, Ordering::Relaxed);
+        let path_ck = STATS.path_check.fetch_add(0, Ordering::Relaxed);
+        let st_ck = STATS.stat_check.fetch_add(0, Ordering::Relaxed);
+        let nev = STATS.never2xfer.fetch_add(0, Ordering::Relaxed);
+        let yo = STATS.too_young.fetch_add(0, Ordering::Relaxed);
         debug!("xfer: {}  dir_entry: {}  paths: {}  stats: {}  never2xfer: {}  tooyoung: {}", xfer, dirs, path_ck, st_ck, nev, yo);
     }
 }

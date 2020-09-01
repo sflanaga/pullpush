@@ -3,11 +3,11 @@
 // #![allow(unused_variables)]
 //
 use std::path::{PathBuf};
-use ssh2::FileStat;
 use anyhow::{Context, anyhow};
 use std::io::{BufWriter, BufRead, Write};
 use std::fs::{File, remove_file};
 use std::time::{SystemTime, Duration, Instant};
+#[allow(unused_imports)]
 use log::{info, debug, warn, error, trace};
 use std::cmp::Ordering;
 use std::ops::{Add, Sub};
@@ -26,9 +26,6 @@ struct Track {
     size: u64,
 }
 
-fn print_type_of<T>(_: &T) {
-    println!("{}", std::any::type_name::<T>())
-}
 
 impl std::hash::Hash for Track {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -56,11 +53,11 @@ impl Ord for Track {
     }
 }
 
-fn u64_to_SystemTime(mtime: u64) -> SystemTime {
+fn u64_to_system_time(mtime: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH.add(Duration::from_secs(mtime))
 }
 
-fn SystemTime_to_u64(mtime: SystemTime) -> u64 {
+fn system_time_to_u64(mtime: SystemTime) -> u64 {
     let dur = mtime.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::from_secs(0));
     dur.as_secs()
 }
@@ -99,7 +96,7 @@ impl Track {
     pub fn from_sftp_entry(path: &PathBuf, filestat: FileStatus) -> Result<Self> {
         Ok(Track {
             src_path: path.clone(),
-            lastmod: SystemTime_to_u64(filestat.mtime),
+            lastmod: system_time_to_u64(filestat.mtime),
             size: filestat.size,
         })
     }
@@ -126,6 +123,7 @@ pub struct Tracker {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum TrackDelta {
     Equal,
     None,
@@ -165,6 +163,7 @@ impl Tracker {
         })
     }
 
+    #[allow(unused)]
     pub fn num_entries(&self) -> usize {
         self.set.len()
     }
@@ -218,7 +217,7 @@ impl Tracker {
             // in inner loop
             let now = SystemTime::now();
             let then = now.sub(max_track_age);
-            SystemTime_to_u64(then)
+            system_time_to_u64(then)
         };
 
         let lines = std::io::BufReader::new(f_h).lines();
@@ -229,11 +228,11 @@ impl Tracker {
                 Err(e) => error!("skipping a line due to {}", e),
                 Ok(t) => {
                     if t.lastmod > mtime_too_old {
-                        trace!("file \"{}\" tracking age: {:?}", t.src_path.display(), u64_to_SystemTime(t.lastmod));
+                        trace!("file \"{}\" tracking age: {:?}", t.src_path.display(), u64_to_system_time(t.lastmod));
                         set.insert(t);
                         count += 1;
                     } else {
-                        trace!("file \"{}\" too old at {:?}", t.src_path.display(), u64_to_SystemTime(t.lastmod));
+                        trace!("file \"{}\" too old at {:?}", t.src_path.display(), u64_to_system_time(t.lastmod));
                     }
                     ()
                 }
@@ -252,6 +251,7 @@ impl Tracker {
         return self.set.contains(&track);
     }
 
+    #[allow(unused)]
     pub fn check(&mut self, path: &PathBuf, filestat: FileStatus) -> Result<TrackDelta> {
         let track = Track::from_sftp_entry(&path, filestat)?;
         match self.set.get(&track) {
@@ -271,6 +271,7 @@ impl Tracker {
     /// Here we just want to record the path in the tracker so
     /// we can filter it fast later.
     /// We do no flushing of buffers here om the WAL
+    #[allow(unused)]
     pub fn insert_path(&mut self, path: &PathBuf) -> Result<()> {
         let fs = FileStatus {
             mtime: SystemTime::UNIX_EPOCH,

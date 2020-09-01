@@ -1,6 +1,7 @@
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow};
+#[allow(unused_imports)]
 use log::{debug, error, info, trace, warn, Record};
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::Receiver;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use crate::vfs::FileStatus;
@@ -42,11 +43,11 @@ fn __get_stats(recv: &Receiver<Option<PathBuf>>, list: &mut Arc<Mutex<Option<Vec
 
 pub fn get_stats_fast(no_threads: usize, list: &mut Vec<PathBuf>) -> Result<Vec<(PathBuf,FileStatus)>> {
 
-    let mut results = Arc::new(Mutex::new(Some(vec![])));
+    let results = Arc::new(Mutex::new(Some(vec![])));
     {
         let (s, r) = crossbeam_channel::unbounded();
         let mut vec_h = vec![];
-        for t in 0..no_threads {
+        for _t in 0..no_threads {
             let r_c = r.clone();
             let mut res_c = results.clone();
             let h = spawn(move || get_stats(&r_c, &mut res_c));
@@ -63,7 +64,7 @@ pub fn get_stats_fast(no_threads: usize, list: &mut Vec<PathBuf>) -> Result<Vec<
             }
         }
 
-        for t in 0..no_threads {
+        for _t in 0..no_threads {
             s.send(None)?;
         }
 

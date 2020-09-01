@@ -20,12 +20,12 @@ use std::sync::atomic::Ordering;
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 
-struct SftpFile {
+pub struct SftpFile {
     path: PathBuf,
     file: ssh2::File,
 }
 
-struct LocalFile {
+pub struct LocalFile {
     path: PathBuf,
     itr: ReadDir,
 }
@@ -45,13 +45,13 @@ pub struct FileStatus {
     pub mtime: SystemTime,
 }
 
-struct SftpVfs {
+pub struct SftpVfs {
     write_perm: Option<u32>,
     base_dir: PathBuf,
     sftp: Sftp,
 }
 
-struct LocalVfs {
+pub struct LocalVfs {
     base_dir: PathBuf,
 }
 

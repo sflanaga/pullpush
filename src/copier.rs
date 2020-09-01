@@ -1,14 +1,99 @@
-use std::io::{Read, Write, ErrorKind, BufWriter, BufReader};
-use std::io;
-use std::thread::spawn;
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unreachable_code)]
+
+use std::io::{Read, Write};
+use std::thread::{spawn, JoinHandle};
 use anyhow::{anyhow, Context};
-use std::any::Any;
+#[allow(unused_imports)]
 use log::{debug, error, info, trace, warn, Record};
 use std::sync::{Arc, Mutex, MutexGuard};
-use ssh2::File;
 use std::time::Instant;
+use crossbeam_channel::{Receiver, Sender};
 
 type Result<T> = anyhow::Result<T, anyhow::Error>;
+
+struct Copier {
+    read_h_s: Sender<Arc<Mutex<Box<dyn Read + Send>>>>,
+    write_h_s: Sender<Arc<Mutex<Box<dyn Write + Send>>>>,
+    read_h_r: Receiver<Arc<Mutex<Box<dyn Read + Send>>>>,
+    write_h_r: Receiver<Arc<Mutex<Box<dyn Write + Send>>>>,
+
+    buff_size: usize,
+    buff_ring_size: usize,
+    read_s: Sender<Option<(usize, Vec<u8>)>>,
+    write_r: Receiver<Option<(usize, Vec<u8>)>>,
+    read_r: Receiver<Option<Vec<u8>>>,
+    write_s: Sender<Option<Vec<u8>>>,
+
+    res_s: Sender<usize>,
+    res_w: Receiver<usize>,
+
+    read_t: JoinHandle<()>,
+    write_t: JoinHandle<()>,
+}
+
+impl Copier {
+    pub fn new(buff_size: usize, buff_ring_size: usize) -> Self {
+        //hmmmm... is this worth is?
+        let (read_h_s, read_h_r) = crossbeam_channel::unbounded();
+        let (write_h_s, write_h_r) = crossbeam_channel::unbounded();
+        let (read_s, write_r) = crossbeam_channel::unbounded::<Option<(usize, Vec<u8>)>>();
+        let (write_s, read_r) = crossbeam_channel::unbounded::<Option<Vec<u8>>>();
+        let (res_s, res_w) = crossbeam_channel::unbounded();
+
+        let read_t = {
+            let file_recv = read_h_r.clone();
+            let buff_send = read_s.clone();
+            let buff_recycle = read_r.clone();
+            spawn(move || reader_thread(file_recv, buff_send, buff_recycle))
+        };
+
+        let write_t = {
+            let file_recv = write_h_r.clone();
+            let buff_send = write_r.clone();
+            let buff_recycle = write_s.clone();
+            spawn(move || writer_thread(file_recv, buff_send, buff_recycle))
+        };
+
+        for _ in 0..buff_ring_size {
+            write_s.send(Some(vec![0u8; buff_size])).context("send in priming of copier routine failed").unwrap();
+        }
+
+        Copier{
+            read_h_s,
+            write_h_s,
+            read_h_r,
+            write_h_r,
+            buff_size,
+            buff_ring_size,
+            read_s,
+            write_r,
+            read_r,
+            write_s,
+            res_s,
+            res_w,
+            read_t,
+            write_t
+        }
+    }
+}
+
+fn reader_thread(file_recv: Receiver<Arc<Mutex<Box<dyn Read + Send>>>>,
+                 buff_send:  Sender<Option<(usize, Vec<u8>)>>,
+                 buff_recycle: Receiver<Option<Vec<u8>>>) -> () {
+
+
+    ()
+}
+
+fn writer_thread(file_recv: Receiver<Arc<Mutex<Box<dyn Write + Send>>>>,
+                 buff_recv:  Receiver<Option<(usize, Vec<u8>)>>,
+                 buff_recycle: Sender<Option<Vec<u8>>>) -> () {
+
+}
 
 fn fill_buff(handle: &mut MutexGuard<dyn Read>, buff: &mut [u8]) -> Result<usize> {
     // eprintln!("call fill");
