@@ -79,9 +79,9 @@ fn run() -> Result<()> {
             Some(r) => match r {
                 Err(e) => return Err(anyhow!("error on reading next entry in ReadDir: {}", e)),
                 Ok(de) => {
-                    let full = cli.path.join(de.path());
-                    let stat = std::fs::metadata(&full)?;
-                    data.push( (full, stat) );
+                    //let full = cli.path.join(de.path());
+                    let stat = std::fs::metadata(de.path())?;
+                    data.push( (de.path().clone(), stat) );
                 },
             }
         }
@@ -91,7 +91,7 @@ fn run() -> Result<()> {
             println!("...");
             break;
         }
-        println!("{}  {:?}", e.1.0.display(), e.1.1);
+        println!("{}  {:?}", (e.1).0.display(), (e.1).1);
     }
 
     info!("read {} files and status in {:?}", data.len(), start_f.elapsed());
