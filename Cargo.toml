@@ -26,6 +26,10 @@ name="ls_time"
 path="src/ls.rs"
 
 [[bin]]
+name="ls_time2"
+path="src/ls2.rs"
+
+[[bin]]
 name="test_vfs"
 path="src/test_vfs.rs"
 
