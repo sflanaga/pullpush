@@ -5,7 +5,7 @@
 use anyhow::{anyhow as ERR, Context};
 use log::{debug, error, info, trace, warn, Record};
 use std::path::{PathBuf, Path};
-use ssh2::{Sftp, Session, FileStat};
+use ssh2::{Sftp, Session, FileStat, RenameFlags};
 use libssh2_sys::LIBSSH2_ERROR_FILE;
 use std::fs::{ReadDir, Metadata};
 use std::io::{Write, Read};
@@ -188,7 +188,21 @@ impl Vfs {
     }
     pub fn rename(&self, src: &Path, dst: &Path) -> Result<()> {
         match self {
-            Vfs::Sftp(f) => Ok(f.sftp.rename(src, dst, None)?),
+            Vfs::Sftp(f) => {
+
+                let res = f.sftp.rename(src, dst, None);
+                match res {
+                    Err(e) => {
+                        if e.code() == -31 {
+                            warn!("ignore -31 code on rename from {} to {}", src.display(), dst.display());
+                        } else {
+                            return Err(ERR!("sftp rename error: {}", e))
+                        }
+                    },
+                    Ok(()) => return Ok(()),
+                }
+                Ok(())
+            },
             Vfs::Local(f) => Ok(std::fs::rename(src, dst)?),
         }
     }

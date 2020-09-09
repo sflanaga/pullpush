@@ -71,12 +71,6 @@ pub struct Cli {
     /// max age to keep in tracking file
     pub max_track_age: Duration,
 
-    #[structopt(short="v", parse(from_occurrences), conflicts_with("quiet"))]
-    /// log level - e.g. -vvv is the same as debug while -vv is info level
-    ///
-    /// To true debug your settings you might try trace level or -vvvv
-    pub verbosity: usize,
-
     #[structopt(long, default_value("64k"), parse(try_from_str = to_size_usize))]
     /// Size of the buffer between pull and push connections e.g. 1M or 256k
     ///
@@ -117,25 +111,14 @@ pub struct Cli {
     /// Number of transfer threads and also connections used + 1 to source
     pub threads: usize,
 
-    // #[structopt(long)]
-    // /// Create sftp channels from a single session
-    // ///
-    // /// By default each transfer thread creates it's down session for performance.
-    // /// This changes things so that each thread re-uses a single session, but creates
-    // /// a seperate channel for each thread instaed.  This can slow down transfers,
-    // /// but minimizes the number of sessions to remote dest.
-    // /// While the channels do allow multiple exchanges in flight, they do seem
-    // /// to limit performance.
-    // pub reuse_sessions: bool,
-
     #[structopt(long)]
-    /// queue files to xfer while still listing other files
+    /// files are queued as found by default - this queues them after all are found at once
     ///
     /// In some cases the xfer might interfere with the listing performance.
     /// However, this allows files to start flowing before the listing
     /// finishes, so it may be useful in some situations.  Honestly, this was
     /// added to figure out which works best.
-    pub queue_as_found: bool,
+    pub disable_queue_as_found: bool,
 
     #[structopt(long)]
     /// everyfile listed will be added to lister to make future listing faster
@@ -150,14 +133,11 @@ pub struct Cli {
     pub add_all_to_tracker: bool,
 
     #[structopt(long)]
-    /// NOT yet implemented -- If the size or last mod on the file change then send and/or overwrite downstream
+    /// files are overwritten on dst if size or time changes on faile - this disables that
     ///
-    /// By default only the path is check against the list
-    /// and not the status of the file.
-    /// This is faster as path listing of local files is 2X faster in some cases
-    /// than also getting the metadata on the file.
-    /// However, there is not performance different if the source is remote.
-    pub overwrite_if_stats_change: bool,
+    /// Disabling this causes checks to be based on path only.  It can be faster in some cases
+    /// but destination will miss out of changed files.
+    pub disable_overwrite: bool,
 
     #[structopt(long)]
     /// Include hidden files or files starting with '.'

@@ -145,6 +145,8 @@ impl Tracker {
             if std::fs::metadata(&wal_path)?.len() == 0 {
                 warn!("wal file there but empty, so ignoring \"{}\"", &wal_path.display());
             } else {
+                // note the wal may overwrite track entries which happened above
+                // the wal may have later updates.
                 Tracker::entries_from(&wal_path, &mut set, max_track_age)?;
                 warn!("existing wal file: {}, read - so writing new tracker file to prevent further issues", &wal_path.display());
                 Tracker::write_entries(file, &set)?;
@@ -201,6 +203,7 @@ impl Tracker {
     }
 
     fn entries_from(path: &PathBuf, set: &mut HashSet<Track>, max_track_age: Duration) -> Result<()> {
+        trace!("reading state file: {}", path.display());
         let now = SystemTime::now();
 
         let f_h = match File::open(&path) {
@@ -228,8 +231,14 @@ impl Tracker {
                 Err(e) => error!("skipping a line due to {}", e),
                 Ok(t) => {
                     if t.lastmod > mtime_too_old {
-                        trace!("file \"{}\" tracking age: {:?}", t.src_path.display(), u64_to_system_time(t.lastmod));
-                        set.insert(t);
+                        let lastmod = t.lastmod;
+                        if set.contains(&t) {
+                            trace!("replacing entry file \"{}\" tracking age: {:?}", &t.src_path.display(), u64_to_system_time(lastmod));
+                            set.replace(t);
+                        } else {
+                            trace!("entry file \"{}\" tracking age: {:?}", t.src_path.display(), u64_to_system_time(lastmod));
+                            set.insert(t);
+                        }
                         count += 1;
                     } else {
                         trace!("file \"{}\" too old at {:?}", t.src_path.display(), u64_to_system_time(t.lastmod));
@@ -252,7 +261,7 @@ impl Tracker {
     }
 
     #[allow(unused)]
-    pub fn check(&mut self, path: &PathBuf, filestat: FileStatus) -> Result<TrackDelta> {
+    pub fn check(&self, path: &PathBuf, filestat: FileStatus) -> Result<TrackDelta> {
         let track = Track::from_sftp_entry(&path, filestat)?;
         match self.set.get(&track) {
             None => Ok(TrackDelta::None),
@@ -295,7 +304,7 @@ impl Tracker {
         let track = Track::from_sftp_entry(&path, filestat)
             .with_context(|| anyhow!("Not able to add entry to tracker: {:?}", (&path, filestat)))?;
         track.write(self.wal.as_mut().unwrap())?;
-        self.set.insert(track);
+        self.set.replace(track);
         self.wal.as_mut().unwrap().flush()?;
         Ok(())
     }

@@ -23,6 +23,7 @@ use track::Tracker;
 use vfs::{FileStatus, Vfs};
 
 use crate::cli::Cli;
+use crate::track::TrackDelta;
 
 mod cli;
 mod track;
@@ -71,12 +72,6 @@ fn run() -> Result<()> {
         let mut cli = Cli::from_args();
         check_url(&cli.src_url)?;
         check_url(&cli.dst_url)?;
-        if cli.verbosity == 0 {
-            cli.verbosity = 2;
-        }
-        if cli.overwrite_if_stats_change {
-            return Err(anyhow!("overwrite_if_stats_change not supported yet"));
-        }
         cli
     });
 
@@ -225,8 +220,12 @@ fn xfer_file(cli_c: &Arc<Cli>, path: &PathBuf, src: &Vfs, dst: &Vfs) -> Result<(
     match dst.stat(&dst_path) {
         Err(_) => (), // silencing useless info... for now warn!("continue with error during stat of dest remote \"{}\", {}", &dst_path.display(), e),
         Ok(_) => {
-            warn!("file: \"{}\" already at {} and recording it as xferred - no overwrite option yet", &path.file_name().unwrap().to_string_lossy(), &cli_c.dst_url);
-            return Ok((0, 0));
+            if cli_c.disable_overwrite {
+                warn!("file: \"{}\" already at {} and recording it as xferred - no overwrite so skipping", &path.file_name().unwrap().to_string_lossy(), &cli_c.dst_url);
+                return Ok((0, 0));
+            } else {
+                warn!("overwriting changed file: \"{}\" already at {} ", &path.file_name().unwrap().to_string_lossy(), &cli_c.dst_url);
+            }
         }
     }
     let start_open = Instant::now();
@@ -284,46 +283,50 @@ fn get_file_age(path: &PathBuf, filestat: &FileStatus) -> Duration {
     }
 }
 
-
-fn keep_path(cli: &Arc<Cli>, path: &PathBuf, tracker: &Arc<RwLock<Tracker>>) -> Result<bool> {
+fn keep_path(cli: &Arc<Cli>, path: &PathBuf, tracker: &Arc<RwLock<Tracker>>) -> bool {
     STATS.path_check.fetch_add(1, Ordering::Relaxed);
 
     let s = match path.file_name() {
         None => {
             error!("Cannot map path to a filename - weird \"{}\"", &path.display());
-            return Ok(false);
+            return false;
         }
         Some(s) => s.to_string_lossy(),
     };
 
-    if !cli.re.is_match(&s.as_bytes())? {
+    if !cli.re.is_match(&s.as_bytes()).expect("RE checked failed in keep_path") {
         trace!("file \"{}\" does not match RE", s);
-        return Ok(false);
+        return false;
     }
 
     if s.starts_with('.') && !cli.include_dot_files {
         trace!("file \"{}\" excluded as a dot file or hidden", &path.display());
-        return Ok(false);
+        return false;
     }
 
-    match tracker.read() {
-        Err(e) => return Err(anyhow!("could not read lock tracker due to {}", &e)),
-        Ok(l) => {
-            if l.path_exists_in_tracker(&path) {
-                trace!("file \"{}\" already in tracker", &path.display());
-                return Ok(false);
-            }
+    if cli.disable_overwrite {
+        // we only exclude on path check IF we are NOT in overwrite mode
+        // yes this slows things down for NFS/NAS sources, but we must do it
+        // for safest default path
+        if tracker.read().expect("Unable to read lock track for path check").path_exists_in_tracker(&path) {
+            trace!("file \"{}\" already in tracker", &path.display());
+            return false;
+        } else {
+            trace!("file \"{}\" not already in tracker", &path.display());
+            return true;
         }
+    } else {
+        trace!("file overwrite enable so stat check is needed for \"{}\"", &path.display());
+        return true;
     }
-
-    Ok(true)
 }
 
 const FILE_TOO_OLD: u32 = 1;
 const FILE_TOO_YOUNG: u32 = 2;
 const FILE_NOT_A_FILE: u32 = 4;
+const SRC_FILE_NOT_CHANGED: u32 = 8;
 
-fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus) -> Result<u32> {
+fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus, tracker: &Arc<RwLock<Tracker>>) -> Result<u32> {
     STATS.stat_check.fetch_add(1, Ordering::Relaxed);
 
     if filestatus.file_type == vfs::FileType::Regular {
@@ -334,12 +337,27 @@ fn keep_status(cli: &Arc<Cli>, path: &PathBuf, filestatus: FileStatus) -> Result
         } else if age < cli.min_age {
             trace!("file \"{}\" too new at {:?}", &path.display(), age);
             return Ok(FILE_TOO_YOUNG);
+        } else if !cli.disable_overwrite {
+            match tracker.read().expect("could not lock reader in keep_status").check(&path, filestatus)? {
+                TrackDelta::SizeChange => {
+                    info!("src file changed size: \"{}\"",path.display());
+                    Ok(0)
+                },
+                TrackDelta::LastModChange => {
+                    info!("src changed mod time: \"{}\"", path.display());
+                    Ok(0)
+                },
+                TrackDelta::None => Ok(0),
+                _ => Ok(SRC_FILE_NOT_CHANGED)
+            }
+        } else {
+            Ok(0)
         }
-        Ok(0)
     } else {
         trace!("dir: {}", &path.display());
-        return Ok(FILE_NOT_A_FILE);
+        Ok(FILE_NOT_A_FILE)
     }
+
 }
 
 fn lister_thread(cli: &Arc<Cli>, src: Vfs, tracker: &Arc<RwLock<Tracker>>, send: &Sender<Option<(PathBuf, FileStatus)>>) -> Result<ListResults> {
@@ -400,33 +418,30 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
 
     let start_path_filter = Instant::now();
 
+    // this check is faster so done in list
     let list = if !has_stat {
         let start_f = Instant::now();
         let mut path_checked_list = list.iter()
             .map(|(p, o)| (dir_path.join(&p), o))
-            .filter(|(p, _o)| {
-                match keep_path(&cli, p, &tracker) {
-                    Err(e) => {
-                        error!("Unable to check path {} due to {}", p.display(), e);
-                        false
-                    }
-                    Ok(keep) => keep,
-                }
-            }).map(|(p, _o)| p).collect::<Vec<_>>();
+            .filter(|(p, _o)| keep_path(cli, p, tracker))
+            .map(|(p, _o)| p).collect::<Vec<_>>();
         info!("path based checks of {} in {:?}", list.len(), start_f.elapsed());
         let start_f = Instant::now();
         let x = fast_stat::get_stats_fast(cli.local_file_stat_thread_pool_size, &mut path_checked_list).context("get fast stats failure")?;
         info!("fast file stat of {} in {:?}", x.len(), start_f.elapsed());
         x
     } else {
-        list.iter().map(|(p,o)| (dir_path.join(p).clone(), o.unwrap().clone())).collect::<Vec<_>>()
+        list.iter().map(|(p,o)| (dir_path.join(p).clone(), o.unwrap().clone()))
+            .filter(|(p, _o)| keep_path(cli, p, tracker))
+            .collect::<Vec<_>>()
     };
 
     stats.path_filter_time = start_path_filter.elapsed();
 
+    // this check can be slower so option to send as we find
     let start_stat_filter = Instant::now();
     for (path, filestatus) in list.iter() {
-        let k_s = keep_status(&cli, &path, *filestatus)?;
+        let k_s = keep_status(&cli, &path, *filestatus, &tracker)?;
         stats.paths_stat_ed +=1;
         if k_s & FILE_NOT_A_FILE != 0 || k_s & FILE_TOO_OLD != 0 {
             // these file should never be transferred in the future
@@ -436,9 +451,11 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
             STATS.too_young.fetch_add(1, Ordering::Relaxed);
             // do nothing but it will show up again and be old enough
             // and should be xferred
+        } else if k_s & SRC_FILE_NOT_CHANGED != 0 {
+            trace!("path stats have not changed: \"{}\"", path.display());
         } else {
             if !cli.dry_run {
-                if cli.queue_as_found {
+                if !cli.disable_queue_as_found {
                     trace!("queueing file: {}", path.display());
                     send.send(Some((path.clone(), *filestatus)))?;
                 } else {
@@ -453,7 +470,7 @@ fn inner_lister_thread(cli: &Arc<Cli>, mut src: Vfs, tracker: &Arc<RwLock<Tracke
     stats.stat_filter_time = start_stat_filter.elapsed();
 
     let start_queue_time = Instant::now();
-    if !cli.queue_as_found {
+    if cli.disable_queue_as_found {
         trace!("queueing all files for xfer at once");
         let start_f = Instant::now();
         let count = xfer_list.len();
